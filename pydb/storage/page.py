@@ -39,6 +39,8 @@ class PageType(IntEnum):
     """Page 0: database file metadata."""
     FREE = 2
     """On the free list, waiting to be reused."""
+    TABLE_HEAP = 3
+    """A slotted page holding rows of one table."""
 
 
 @dataclass(frozen=True, slots=True)

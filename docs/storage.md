@@ -13,7 +13,7 @@ Every page begins with a 24-byte header (`pydb/storage/page.py`), little-endian:
 | Offset | Size | Field | Notes |
 |---|---|---|---|
 | 0 | 4 | `page_id` | The page's own id; a mismatch on read means a misdirected write |
-| 4 | 1 | `page_type` | `EMPTY` = 0, `HEADER` = 1, `FREE` = 2 |
+| 4 | 1 | `page_type` | `EMPTY` = 0, `HEADER` = 1, `FREE` = 2, `TABLE_HEAP` = 3 |
 | 5 | 3 | reserved | |
 | 8 | 8 | `page_lsn` | LSN of the last log record applied to the page |
 | 16 | 4 | checksum | CRC32 (`zlib.crc32`) of bytes `[0:16]` and `[20:4096]` |
@@ -55,6 +55,76 @@ space.
 **Limit:** an allocation or free writes two pages (the page and the header page) without a
 log, so a crash between the two writes can leak a page. The write-ahead log will make these
 changes atomic.
+
+## Types
+
+| Type | Storage | Python value |
+|---|---|---|
+| `INT` | 8 bytes, `<q` | `int` in the signed 64-bit range (`bool` is rejected) |
+| `FLOAT` | 8 bytes, `<d` | `float`; an `int` is accepted and stored as a float |
+| `BOOL` | 1 byte | `bool` |
+| `TEXT` | `[u16 length][UTF-8]` | `str` of at most 1024 bytes in UTF-8 |
+
+`None` is SQL NULL and is recorded in the row's null bitmap (`pydb/types.py`).
+
+## Row format
+
+`pydb/storage/tuple.py`, `RowLayout(types)`:
+
+```
+[null bitmap][fixed-width columns][TEXT offsets][TEXT data]
+```
+
+- **Null bitmap:** `ceil(n / 8)` bytes, bit `i` (LSB first) set when column `i` is NULL.
+- **Fixed-width columns:** every INT, FLOAT and BOOL column in schema order. A NULL column
+  keeps its slot, so a column's offset depends only on the schema.
+- **TEXT offsets:** one u16 per TEXT column, the offset of its data from the row start.
+- **TEXT data:** `[u16 length][bytes]` per non-NULL TEXT column.
+
+Example, schema `(INT, TEXT, BOOL)`, row `(7, 'hi', NULL)`, 16 bytes:
+
+```
+04 | 07 00 00 00 00 00 00 00 | 00 | 0c 00 | 02 00 68 69
+```
+
+## Slotted pages
+
+`pydb/storage/slotted_page.py`. After the common header:
+
+| Offset | Size | Field |
+|---|---|---|
+| 24 | 2 | slot count |
+| 26 | 2 | free pointer (start of the tuple area; 4096 when empty) |
+| 28 | 4 | next page id |
+| 32 | 4 | prev page id |
+| 36 | 4 per slot | slot array: `(offset u16, length u16)` |
+
+The slot array grows forward and tuples grow backward from the end of the page. The largest
+tuple is `4096 - 36 - 4 = 4056` bytes; anything larger raises `RowTooLargeError`.
+
+- **Delete** sets the slot's offset to 0 (a tombstone).
+- **Update** overwrites in place when the new tuple is not longer; otherwise it moves the
+  tuple within the page if the page has room after compaction, and reports failure if not.
+- **Compact** packs live tuples against the end of the page. Slot ids do not change.
+- **Slot ids are never reused**, so a RID always means the same row. A deleted row's RID
+  must stay unclaimed until its delete can no longer be rolled back. The cost is 4 bytes
+  per dead slot.
+
+## Table heap
+
+`pydb/storage/table_heap.py`. A table is a doubly linked list of slotted pages starting at
+`first_page_id`. A row is addressed by a `RID(page_id, slot_id)`.
+
+- **Insert** starts at an in-memory hint (the last page that accepted a row), walks forward
+  along the chain, and appends a page at the tail when every page from the hint on is full.
+  A new page is written before the previous tail is linked to it, so a crash leaves an
+  unreferenced page rather than a dangling link.
+- **Update** stays in place when the row fits on its page. Otherwise it inserts the new
+  version, deletes the old one and returns the new RID; the caller updates the indexes.
+- **Scan** yields live rows page by page, in slot order.
+
+**Limits:** the hint only moves forward, so space freed on pages before the hint is reused
+only after the table is reopened. Empty pages stay in the chain.
 
 ## Counters
 

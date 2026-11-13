@@ -9,6 +9,14 @@ class NotSupportedError(PyDBError):
     """A valid request that this version of PyDB does not implement."""
 
 
+class TypeMismatchError(PyDBError):
+    """A value does not match the type it is being stored or compared as."""
+
+
+class ValueTooLargeError(PyDBError):
+    """A value is outside the range its type can represent (e.g. TEXT over its byte limit)."""
+
+
 class StorageError(PyDBError):
     """A failure in the storage layer (files, pages, rows)."""
 
@@ -19,3 +27,7 @@ class CorruptPageError(StorageError):
 
 class RowTooLargeError(StorageError):
     """A serialized row does not fit in a single page."""
+
+
+class RecordNotFoundError(StorageError):
+    """A RID refers to a slot that does not exist or has been deleted."""

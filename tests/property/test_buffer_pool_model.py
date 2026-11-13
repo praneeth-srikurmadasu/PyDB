@@ -83,5 +83,5 @@ class BufferPoolModel(RuleBasedStateMachine):
         self._tmp.cleanup()
 
 
-BufferPoolModel.TestCase.settings = settings(max_examples=60, stateful_step_count=40, deadline=None)
+BufferPoolModel.TestCase.settings = settings(stateful_step_count=40, deadline=None)
 TestBufferPoolModel = BufferPoolModel.TestCase

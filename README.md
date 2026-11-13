@@ -24,6 +24,14 @@ py -3.13 -m venv .venv
 
 On Linux or macOS, use `.venv/bin/python` instead.
 
+Property-based tests run 50 examples each by default. For a deeper run (about 10x longer):
+
+```powershell
+$env:HYPOTHESIS_PROFILE = "thorough"
+& "$HOME\Projects\PyDB\.venv\Scripts\python.exe" -m pytest
+Remove-Item Env:HYPOTHESIS_PROFILE
+```
+
 ## License
 
 MIT, see [LICENSE](LICENSE).

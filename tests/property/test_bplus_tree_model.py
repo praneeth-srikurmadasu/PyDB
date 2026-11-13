@@ -119,7 +119,7 @@ class NonUniqueTreeModel(_TreeModel):
     unique = False
 
 
-_config = settings(max_examples=80, stateful_step_count=60, deadline=None)
+_config = settings(stateful_step_count=60, deadline=None)
 UniqueTreeModel.TestCase.settings = _config
 NonUniqueTreeModel.TestCase.settings = _config
 TestUniqueTreeModel = UniqueTreeModel.TestCase

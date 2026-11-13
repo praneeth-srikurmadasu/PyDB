@@ -60,5 +60,5 @@ class SlottedPageModel(RuleBasedStateMachine):
         assert self.sp.free_ptr <= PAGE_SIZE
 
 
-SlottedPageModel.TestCase.settings = settings(max_examples=100, stateful_step_count=40)
+SlottedPageModel.TestCase.settings = settings(stateful_step_count=40)
 TestSlottedPageModel = SlottedPageModel.TestCase

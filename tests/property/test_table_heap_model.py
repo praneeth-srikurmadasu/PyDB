@@ -76,5 +76,5 @@ class TableHeapModel(RuleBasedStateMachine):
         self._tmp.cleanup()
 
 
-TableHeapModel.TestCase.settings = settings(max_examples=40, stateful_step_count=40, deadline=None)
+TableHeapModel.TestCase.settings = settings(stateful_step_count=40, deadline=None)
 TestTableHeapModel = TableHeapModel.TestCase

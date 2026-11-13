@@ -78,5 +78,5 @@ class DiskManagerModel(RuleBasedStateMachine):
         self._tmp.cleanup()
 
 
-DiskManagerModel.TestCase.settings = settings(max_examples=50, stateful_step_count=30)
+DiskManagerModel.TestCase.settings = settings(stateful_step_count=30)
 TestDiskManagerModel = DiskManagerModel.TestCase

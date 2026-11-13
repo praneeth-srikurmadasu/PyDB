@@ -9,6 +9,16 @@ class NotSupportedError(PyDBError):
     """A valid request that this version of PyDB does not implement."""
 
 
+class SqlSyntaxError(PyDBError):
+    """SQL text that cannot be tokenized or parsed. Carries the 1-based line and column."""
+
+    def __init__(self, message: str, line: int, column: int) -> None:
+        super().__init__(f"SyntaxError at line {line}, col {column}: {message}")
+        self.detail = message
+        self.line = line
+        self.column = column
+
+
 class TypeMismatchError(PyDBError):
     """A value does not match the type it is being stored or compared as."""
 

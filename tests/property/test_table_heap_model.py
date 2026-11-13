@@ -8,6 +8,7 @@ from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 
 from pydb.errors import RecordNotFoundError
+from pydb.storage.buffer_pool import BufferPoolManager
 from pydb.storage.disk_manager import DiskManager
 from pydb.storage.table_heap import RID, TableHeap
 
@@ -20,7 +21,8 @@ class TableHeapModel(RuleBasedStateMachine):
         self._tmp = tempfile.TemporaryDirectory()
         self.path = Path(self._tmp.name) / "heap.db"
         self.disk = DiskManager(self.path)
-        self.heap = TableHeap.create(self.disk)
+        self.pool = BufferPoolManager(self.disk, pool_size=3)
+        self.heap = TableHeap.create(self.pool)
         self.rows: dict[RID, bytes] = {}
         self.dead: set[RID] = set()
 
@@ -52,13 +54,16 @@ class TableHeapModel(RuleBasedStateMachine):
     @rule()
     def reopen(self) -> None:
         first = self.heap.first_page_id
+        self.pool.flush_all()
         self.disk.close()
         self.disk = DiskManager(self.path)
-        self.heap = TableHeap(self.disk, first)
+        self.pool = BufferPoolManager(self.disk, pool_size=3)
+        self.heap = TableHeap(self.pool, first)
 
     @invariant()
     def matches_model(self) -> None:
         assert dict(self.heap.scan()) == self.rows
+        assert self.pool.pinned_pages() == {}
         for rid in list(self.dead)[:5]:
             try:
                 self.heap.get(rid)

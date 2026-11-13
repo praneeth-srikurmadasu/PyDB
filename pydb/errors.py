@@ -31,3 +31,7 @@ class RowTooLargeError(StorageError):
 
 class RecordNotFoundError(StorageError):
     """A RID refers to a slot that does not exist or has been deleted."""
+
+
+class BufferPoolFullError(StorageError):
+    """Every frame in the buffer pool is pinned, so no page can be brought in."""

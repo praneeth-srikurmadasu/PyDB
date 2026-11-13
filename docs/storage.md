@@ -112,19 +112,58 @@ tuple is `4096 - 36 - 4 = 4056` bytes; anything larger raises `RowTooLargeError`
 
 ## Table heap
 
-`pydb/storage/table_heap.py`. A table is a doubly linked list of slotted pages starting at
+`pydb/storage/table_heap.py`. All page access goes through the buffer pool. A table is a
+doubly linked list of slotted pages starting at
 `first_page_id`. A row is addressed by a `RID(page_id, slot_id)`.
 
 - **Insert** starts at an in-memory hint (the last page that accepted a row), walks forward
   along the chain, and appends a page at the tail when every page from the hint on is full.
-  A new page is written before the previous tail is linked to it, so a crash leaves an
-  unreferenced page rather than a dangling link.
 - **Update** stays in place when the row fits on its page. Otherwise it inserts the new
   version, deletes the old one and returns the new RID; the caller updates the indexes.
 - **Scan** yields live rows page by page, in slot order.
 
 **Limits:** the hint only moves forward, so space freed on pages before the hint is reused
-only after the table is reopened. Empty pages stay in the chain.
+only after the table is reopened. Empty pages stay in the chain. Pages reach the disk in
+whatever order the buffer pool evicts or flushes them, so a crash can leave the chain
+inconsistent until the write-ahead log makes multi-page changes atomic.
+
+## Buffer pool
+
+`pydb/storage/buffer_pool.py`, `BufferPoolManager(disk, pool_size=256, log_flusher=None)`.
+
+```
+page_table:  {page_id -> frame_id}
+frames[i]:   data (4096 bytes) | page_id | pin_count | dirty | reader-writer latch
+free_frames: frames that have never held a page (or whose page was deleted)
+replacer:    LRU order over frames with pin_count == 0   (pydb/storage/replacer.py)
+```
+
+- **`fetch_page`** pins a resident page (a hit) or loads it into a free frame, evicting the
+  least recently unpinned frame if necessary (a miss). A dirty victim is written first.
+  When every frame is pinned it raises `BufferPoolFullError`.
+- **`new_page`** allocates a disk page and pins a zeroed `EMPTY` copy of it.
+- **`unpin_page(page_id, dirty)`** drops one pin and ORs in the dirty flag. At zero pins the
+  frame becomes an eviction candidate.
+- **`page(page_id, write=False)`** and **`create_page()`** are context managers that pin,
+  take the frame latch, and on exit release the latch and unpin (dirty if writing), even
+  when the block raises. Code should use these rather than pairing fetch and unpin by hand.
+- **`flush_page`**, **`flush_all`** write dirty pages; **`delete_page`** drops an unpinned
+  page and returns it to the disk free list.
+- **Write-ahead rule:** before writing a dirty page, the pool calls
+  `log_flusher(page_lsn)`. If the call raises, the page stays dirty and resident.
+- **Policy:** steal (a dirty page of unfinished work may be evicted) and no-force (nothing is
+  written at commit). Changes not yet flushed are lost if the process stops without
+  `flush_all()`; the write-ahead log will make that safe.
+
+**Statistics:** `stats` returns hits, misses, evictions, writes and `hit_rate`;
+`pinned_pages()` reports pin counts, and is empty when no pins have leaked.
+
+**Latching:** the pool latch (a `threading.Lock`) protects the page table, frame metadata,
+the replacer, the statistics and all disk I/O. Each frame's `RWLatch`
+(`pydb/storage/latch.py`) protects its bytes: many readers or one writer, and a waiting
+writer blocks new readers. The lock order is always frame latch, then pool latch. Eviction
+only touches unpinned frames, which no thread can be holding a latch on, so the pool never
+waits for a frame latch while holding its own.
 
 ## Counters
 

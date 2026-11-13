@@ -1,0 +1,29 @@
+# Local-only files
+SPEC.md
+CLAUDE.md
+.vscode/
+.idea/
+*.local.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.benchmarks/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Database files
+*.db
+*.wal

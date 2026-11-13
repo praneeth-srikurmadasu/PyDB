@@ -1,0 +1,29 @@
+# PyDB
+
+A disk-based relational database engine written in pure Python (standard library only).
+
+Work in progress.
+
+## Development setup (Windows PowerShell)
+
+```powershell
+cd "$HOME\Projects\PyDB"
+py -3.13 -m venv .venv
+& "$HOME\Projects\PyDB\.venv\Scripts\python.exe" -m pip install --upgrade pip
+& "$HOME\Projects\PyDB\.venv\Scripts\python.exe" -m pip install -e ".[dev]"
+```
+
+## Checks
+
+```powershell
+& "$HOME\Projects\PyDB\.venv\Scripts\python.exe" -m ruff check .
+& "$HOME\Projects\PyDB\.venv\Scripts\python.exe" -m ruff format --check .
+& "$HOME\Projects\PyDB\.venv\Scripts\python.exe" -m mypy
+& "$HOME\Projects\PyDB\.venv\Scripts\python.exe" -m pytest
+```
+
+On Linux or macOS, use `.venv/bin/python` instead.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

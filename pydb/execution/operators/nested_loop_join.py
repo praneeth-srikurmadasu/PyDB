@@ -13,8 +13,14 @@ class NestedLoopJoin(Operator):
     """
 
     def __init__(
-        self, outer: Operator, inner: Operator, predicate: Evaluator | None, kind: str
+        self,
+        outer: Operator,
+        inner: Operator,
+        predicate: Evaluator | None,
+        kind: str,
+        description: str = "",
     ) -> None:
+        self.description = description
         self.outer = outer
         self.inner = inner
         self.predicate = predicate
@@ -23,6 +29,12 @@ class NestedLoopJoin(Operator):
         self._padding = (None,) * len(inner.columns)
         self._outer_row: Row | None = None
         self._matched = False
+
+    def label(self) -> str:
+        return f"NestedLoopJoin {self.kind} {self.description}".rstrip()
+
+    def children(self) -> list[Operator]:
+        return [self.outer, self.inner]
 
     def open(self) -> None:
         self.outer.open()

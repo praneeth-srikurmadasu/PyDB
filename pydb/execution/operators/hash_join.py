@@ -25,7 +25,13 @@ class HashJoin(Operator):
         inner_keys: Sequence[Evaluator],
         residual: Evaluator | None,
         kind: str,
+        description: str = "",
+        build_outer: bool = False,
     ) -> None:
+        if build_outer and kind != "INNER":
+            raise ValueError("only an INNER hash join can build on its outer input")
+        self.description = description
+        self.build_outer = build_outer
         self.outer = outer
         self.inner = inner
         self.outer_keys = list(outer_keys)
@@ -36,17 +42,29 @@ class HashJoin(Operator):
         self._padding = (None,) * len(inner.columns)
         self._table: dict[tuple[Value, ...], list[Row]] = {}
         self._pending: Iterator[Row] = iter(())
+        self._probe: Operator = outer
         self.build_rows = 0
+
+    def label(self) -> str:
+        side = "outer" if self.build_outer else "inner"
+        return f"HashJoin {self.kind} {self.description} (build {side})".replace("  ", " ")
+
+    def children(self) -> list[Operator]:
+        return [self.outer, self.inner]
 
     def open(self) -> None:
         self._table = {}
         self.build_rows = 0
-        for row in self.inner.rows():
+        build, build_keys = (
+            (self.outer, self.outer_keys) if self.build_outer else (self.inner, self.inner_keys)
+        )
+        for row in build.rows():
             self.build_rows += 1
-            key = tuple(k(row) for k in self.inner_keys)
+            key = tuple(k(row) for k in build_keys)
             if None not in key:
                 self._table.setdefault(key, []).append(row)
-        self.outer.open()
+        self._probe = self.inner if self.build_outer else self.outer
+        self._probe.open()
         self._pending = iter(())
 
     def next(self) -> Row | None:
@@ -54,10 +72,18 @@ class HashJoin(Operator):
             row = next(self._pending, None)
             if row is not None:
                 return row
-            outer_row = self.outer.next()
-            if outer_row is None:
+            probe_row = self._probe.next()
+            if probe_row is None:
                 return None
-            self._pending = iter(self._matches(outer_row))
+            if self.build_outer:  # probing with inner rows; output is still outer + inner
+                key = tuple(k(probe_row) for k in self.inner_keys)
+                found = [] if None in key else self._table.get(key, [])
+                rows = [outer_row + probe_row for outer_row in found]
+                if self.residual is not None:
+                    rows = [r for r in rows if self.residual(r) is True]
+                self._pending = iter(rows)
+            else:
+                self._pending = iter(self._matches(probe_row))
 
     def _matches(self, outer_row: Row) -> list[Row]:
         key = tuple(k(outer_row) for k in self.outer_keys)
@@ -71,4 +97,5 @@ class HashJoin(Operator):
 
     def close(self) -> None:
         self.outer.close()
+        self.inner.close()
         self._table = {}

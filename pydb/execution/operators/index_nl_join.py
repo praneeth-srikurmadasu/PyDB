@@ -24,7 +24,9 @@ class IndexNestedLoopJoin(Operator):
         outer_keys: Sequence[Evaluator],
         residual: Evaluator | None,
         kind: str,
+        description: str = "",
     ) -> None:
+        self.description = description
         self.outer = outer
         self.table = table
         self.index = index
@@ -35,6 +37,15 @@ class IndexNestedLoopJoin(Operator):
         self._padding = (None,) * len(table.columns)
         self._pending: Iterator[Row] = iter(())
         self.lookups = 0
+
+    def label(self) -> str:
+        return (
+            f"IndexNestedLoopJoin {self.kind} {self.table.name} using {self.index.name} "
+            f"{self.description}"
+        ).rstrip()
+
+    def children(self) -> list[Operator]:
+        return [self.outer]
 
     def open(self) -> None:
         self.outer.open()

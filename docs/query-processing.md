@@ -193,13 +193,16 @@ correct entry per heap row; the tests call it after DML.
 
 ## SELECT plans
 
-`pydb/planner/physical_plan.py` builds this pipeline from a bound `SELECT`, leaving out the
+`pydb/planner/optimizer.py` builds this pipeline from a bound `SELECT`, leaving out the
 stages a query does not need:
 
 ```
-SeqScan -> Join ... -> Filter(WHERE) -> HashAggregate -> Filter(HAVING)
-        -> Projection -> Distinct -> Sort | TopN -> Limit -> Projection (drop hidden columns)
+access path -> Join ... -> Filter(remaining WHERE) -> HashAggregate -> Filter(HAVING)
+            -> Projection -> Distinct -> Sort | TopN -> Limit -> Projection (drop hidden columns)
 ```
+
+The optimizer works on the bound query and produces physical operators directly; there is
+no separate logical-plan tree. Its rules are described under *Optimizer* below.
 
 ### Joins
 
@@ -209,16 +212,14 @@ All three algorithms support `INNER` and `LEFT` joins and produce the same rows.
 | Algorithm | Cost | Needs |
 |---|---|---|
 | Nested loop | outer x inner row comparisons | nothing |
-| Hash | outer + inner, inner held in memory | an equality between the two sides |
+| Hash | outer + inner, build side held in memory | an equality between the two sides |
 | Index nested loop | outer x (index lookup) | an equality on the leading column(s) of an inner index |
 
 The `ON` clause is split into its `AND`ed parts. A part of the form
 `outer_expression = inner_expression` is a join key; the rest is a residual predicate
 checked on each candidate pair. Keys containing NULL never match, because `NULL = x` is
-never TRUE. The planner picks an index nested loop if an index fits, else a hash join if
-there is a key, else a nested loop. `PlannerSettings(join_strategy=...)` forces one (falling
-back down the same list when it does not apply); the query-suite tests run every query
-under each.
+never TRUE. An INNER hash join builds its table on whichever input is estimated to be
+smaller; a LEFT hash join always builds on the inner side.
 
 ### Aggregation
 
@@ -249,3 +250,90 @@ the standard library's `sqlite3`, then runs filters, joins (including three-tabl
 self joins), aggregates, `DISTINCT`, `ORDER BY` and `LIMIT`/`OFFSET` queries on both. Every
 query runs under each join algorithm and with a 2 KB sort budget that forces external
 sorting. sqlite3 is only an oracle in that test; the engine does not use it.
+
+## Optimizer
+
+### Statistics
+
+`ANALYZE t` scans the table once (`pydb/planner/stats.py`) and stores in `__stats__` its row
+and page counts and, per column, the number of distinct non-NULL values, NULLs, minimum and
+maximum. Statistics are loaded when the database opens. They are not updated by later
+writes; run `ANALYZE` again after large changes. Before `ANALYZE`, a table is assumed to have
+1000 rows on 20 pages.
+
+**Selectivity** (the fraction of rows a predicate keeps) follows System R:
+
+| Predicate | With statistics | Without |
+|---|---|---|
+| `col = constant` | 1 / distinct | 1/10 |
+| `col = col` (join) | 1 / max(distinct) | 1/10 |
+| `col < constant` etc. | (constant - min) / (max - min), numbers only | 1/3 |
+| `col BETWEEN a AND b` | (b - a) / (max - min) | 1/3 |
+| `col IN (k values)` | k / distinct | k/10 |
+| `col IS NULL` | nulls / rows | 1/3 |
+| `a AND b`, `a OR b`, `NOT a` | s(a)s(b), s(a)+s(b)-s(a)s(b), 1-s(a) | |
+| anything else | | 1/3 |
+
+Equality on every column of a unique index matches at most one row, whatever the formula
+says.
+
+### Rules
+
+1. **Constant folding.** Sub-expressions without columns are evaluated once
+   (`id = 2 * 5` becomes `id = 10`); `x AND TRUE` becomes `x`, `x AND FALSE` becomes
+   `FALSE`, and the same for `OR`. An expression that fails (`1 / 0`) is left unevaluated, so
+   it raises only if a row reaches it.
+2. **Predicate pushdown.** `WHERE` and `ON` are split into `AND`ed parts. A part that reads
+   one table is applied when that table is scanned, below the joins. In a query with LEFT
+   joins, a `WHERE` part about a table on the NULL-padded side stays above the joins
+   (`WHERE b.id IS NULL` must see the padded rows), but an `ON` part about the joined table
+   is pushed into its scan.
+3. **Index selection.** For each index the optimizer takes equality conditions on its leading
+   columns, then either a range (`<`, `<=`, `>`, `>=`, `BETWEEN`, combined into one interval)
+   on the next column or an `IN` list on the first column. It uses an `IndexScan` when the
+   best candidate's selectivity is below 15%; conditions answered by the index are removed
+   from the filter. `UPDATE` and `DELETE` use the same access paths.
+4. **Join algorithm.** Each applicable algorithm is costed and the cheapest is used.
+   `PlannerSettings(join_strategy=...)` can force one.
+5. **Join order.** In a query whose joins are all INNER, every left-deep order of up to four
+   tables (24 orders) is costed and the cheapest kept. Join conditions are applied as soon
+   as all the tables they mention have been joined. Queries with LEFT joins keep the
+   written order.
+6. **TopN** replaces `Sort` + `Limit` for `ORDER BY ... LIMIT n`.
+
+### Cost model
+
+Costs count page reads, plus a small CPU charge per row (`pydb/planner/physical_plan.py`):
+
+| Operator | Cost |
+|---|---|
+| SeqScan | pages + rows x 0.01 |
+| IndexScan | tree height + matches x 1.01 (one page per matching row) |
+| Filter, Projection | child + rows x 0.01 |
+| NestedLoopJoin | outer + outer rows x inner |
+| HashJoin | outer + inner + (outer rows + inner rows) x 0.02 |
+| IndexNestedLoopJoin | outer + outer rows x (height + matches per lookup) |
+| HashAggregate | child + rows x 0.02 |
+| Sort / TopN | child + rows x log2(rows or n) x 0.01 |
+
+A join is estimated to return outer rows x inner rows x selectivity(ON); a LEFT join returns
+at least the outer rows, and a join on the inner table's unique key at most the outer rows.
+
+### EXPLAIN
+
+`EXPLAIN SELECT ...` returns one row per operator, indented under its parent, with the
+estimates:
+
+```
+Projection [name]  (rows=60 cost=61.60)
+-> NestedLoopJoin INNER on (dept_id = id)  (rows=60 cost=61.00)
+  -> Filter (name = 'd7')  (rows=1 cost=2.00)
+    -> SeqScan dept  (rows=50 cost=1.50)
+  -> SeqScan emp  (rows=3000 cost=59.00)
+```
+
+`EXPLAIN ANALYZE` runs the query and adds, per operator, the rows it produced, the time spent
+and the buffer pool hits and misses. Time and buffer counts include the operator's children.
+`loops=N` shows an operator opened N times, such as the inner side of a nested loop, whose
+row count is the total over all loops. A final line gives the total rows, time and buffer
+traffic.

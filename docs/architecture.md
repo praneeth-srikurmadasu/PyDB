@@ -8,6 +8,8 @@ Lexer → Parser → AST                      pydb/sql/
   ▼
 Binder (names, types) ← Catalog           pydb/planner/binder.py, pydb/catalog/
   ▼
+Optimizer (rules, statistics, costs)      pydb/planner/optimizer.py, stats.py
+  ▼
 Operator tree (Volcano)                   pydb/execution/
   ▼
 TableHeap (slotted pages)  +  B+ trees    pydb/storage/, pydb/index/
@@ -27,9 +29,11 @@ Each layer only calls the one below it. Everything is in one process and one fil
 2. **Bind** (`Binder.bind_select`): `users` is looked up in the catalog; `name` and `age`
    become row positions 1 and 3; `age > 30` is checked (INT compared with INT) and typed
    BOOL; the WHERE clause must be BOOL.
-3. **Plan** (`build_select` in `pydb/planner/physical_plan.py`):
-   `Projection([col 1]) ← Filter(col 3 > 30) ← SeqScan(users)`. Joins, grouping, sorting
-   and limits add stages to this pipeline (see query-processing.md).
+3. **Optimize** (`Optimizer.plan_select`): constants are folded, `age > 30` is estimated to
+   keep a third of the rows (or a measured fraction after `ANALYZE`), so an index on `age`
+   would not be used, and the plan is
+   `Projection([col 1]) ← Filter(col 3 > 30) ← SeqScan(users)`. `EXPLAIN` shows this tree.
+   Joins, grouping, sorting and limits add stages (see query-processing.md).
    Bound expressions are compiled once into Python closures.
 4. **Execute**: `Projection.next()` asks `Filter.next()`, which asks `SeqScan.next()` until a
    row's predicate is TRUE. `SeqScan` walks the table's page chain through the buffer pool,
@@ -41,7 +45,7 @@ writes the heap and every index (`pydb/execution/table_writer.py`).
 
 ## Catalog
 
-The catalog is stored in the database file as three system tables, which describe
+The catalog is stored in the database file as system tables, which describe
 themselves as well as user tables:
 
 | Table | Columns |
@@ -49,9 +53,10 @@ themselves as well as user tables:
 | `__tables__` | `table_id`, `name`, `first_page` |
 | `__columns__` | `table_id`, `position`, `name`, `type`, `length`, `not_null`, `default_sql` |
 | `__indexes__` | `index_id`, `name`, `table_id`, `header_page`, `is_unique`, `is_primary`, `columns` |
+| `__stats__` | `table_id`, `position` (-1 for the table), `row_count`, `page_count`, `distinct_count`, `null_count`, `min_sql`, `max_sql` |
 
 The header page's `catalog_root` is the first page of `__tables__`. Opening a database
-scans `__tables__` to find the other two, then loads every table and index description into
+scans `__tables__` to find the others (adding `__stats__` to files made before it existed), then loads every table and index description into
 memory (`pydb/catalog/catalog.py`). Defaults are stored as SQL literals and parsed back.
 
 - `PRIMARY KEY` creates a unique index `<table>_pkey` and makes its columns NOT NULL.

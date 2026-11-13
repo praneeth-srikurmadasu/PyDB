@@ -132,37 +132,87 @@ def column_refs(expr: "BoundExpr") -> set[int]:
     return refs
 
 
-def shift_columns(expr: "BoundExpr", offset: int) -> "BoundExpr":
-    """The same expression reading column ``i + offset`` wherever it read column ``i``."""
+def map_columns(expr: "BoundExpr", fn: Callable[[int], int]) -> "BoundExpr":
+    """The same expression reading column ``fn(i)`` wherever it read column ``i``."""
     match expr:
         case BoundColumn(index=index):
-            return replace(expr, index=index + offset)
+            return replace(expr, index=fn(index))
         case BoundUnary(operand=operand) | BoundIsNull(operand=operand):
-            return replace(expr, operand=shift_columns(operand, offset))
+            return replace(expr, operand=map_columns(operand, fn))
         case BoundBinary(left=left, right=right):
-            return replace(
-                expr, left=shift_columns(left, offset), right=shift_columns(right, offset)
-            )
+            return replace(expr, left=map_columns(left, fn), right=map_columns(right, fn))
         case BoundInList(operand=operand, items=items):
             return replace(
                 expr,
-                operand=shift_columns(operand, offset),
-                items=tuple(shift_columns(i, offset) for i in items),
+                operand=map_columns(operand, fn),
+                items=tuple(map_columns(i, fn) for i in items),
             )
         case BoundBetween(operand=operand, low=low, high=high):
             return replace(
                 expr,
-                operand=shift_columns(operand, offset),
-                low=shift_columns(low, offset),
-                high=shift_columns(high, offset),
+                operand=map_columns(operand, fn),
+                low=map_columns(low, fn),
+                high=map_columns(high, fn),
             )
         case BoundLike(operand=operand, pattern=pattern):
-            return replace(
-                expr, operand=shift_columns(operand, offset), pattern=shift_columns(pattern, offset)
-            )
+            return replace(expr, operand=map_columns(operand, fn), pattern=map_columns(pattern, fn))
         case BoundFunction(args=args):
-            return replace(expr, args=tuple(shift_columns(a, offset) for a in args))
+            return replace(expr, args=tuple(map_columns(a, fn) for a in args))
     return expr
+
+
+def map_children(expr: "BoundExpr", fn: Callable[["BoundExpr"], "BoundExpr"]) -> "BoundExpr":
+    """Rebuild ``expr`` with ``fn`` applied to each of its direct sub-expressions."""
+    match expr:
+        case BoundUnary(operand=operand) | BoundIsNull(operand=operand):
+            return replace(expr, operand=fn(operand))
+        case BoundBinary(left=left, right=right):
+            return replace(expr, left=fn(left), right=fn(right))
+        case BoundInList(operand=operand, items=items):
+            return replace(expr, operand=fn(operand), items=tuple(fn(i) for i in items))
+        case BoundBetween(operand=operand, low=low, high=high):
+            return replace(expr, operand=fn(operand), low=fn(low), high=fn(high))
+        case BoundLike(operand=operand, pattern=pattern):
+            return replace(expr, operand=fn(operand), pattern=fn(pattern))
+        case BoundFunction(args=args):
+            return replace(expr, args=tuple(fn(a) for a in args))
+    return expr
+
+
+def shift_columns(expr: "BoundExpr", offset: int) -> "BoundExpr":
+    return map_columns(expr, lambda i: i + offset)
+
+
+def render(expr: "BoundExpr") -> str:
+    """Readable SQL-like text for EXPLAIN output."""
+    match expr:
+        case BoundLiteral(value=value):
+            if value is None:
+                return "NULL"
+            if isinstance(value, bool):
+                return "TRUE" if value else "FALSE"
+            if isinstance(value, str):
+                return "'" + value.replace("'", "''") + "'"
+            return repr(value)
+        case BoundColumn(name=name):
+            return name
+        case BoundUnary(op=op, operand=operand):
+            return f"({op} {render(operand)})"
+        case BoundBinary(op=op, left=left, right=right):
+            return f"({render(left)} {op} {render(right)})"
+        case BoundIsNull(operand=operand, negated=negated):
+            return f"({render(operand)} IS {'NOT ' if negated else ''}NULL)"
+        case BoundInList(operand=operand, items=items, negated=negated):
+            inner = ", ".join(render(i) for i in items)
+            return f"({render(operand)} {'NOT ' if negated else ''}IN ({inner}))"
+        case BoundBetween(operand=operand, low=low, high=high, negated=negated):
+            keyword = "NOT BETWEEN" if negated else "BETWEEN"
+            return f"({render(operand)} {keyword} {render(low)} AND {render(high)})"
+        case BoundLike(operand=operand, pattern=pattern, negated=negated):
+            return f"({render(operand)} {'NOT ' if negated else ''}LIKE {render(pattern)})"
+        case BoundFunction(name=name, args=args):
+            return f"{name}({', '.join(render(a) for a in args)})"
+    return repr(expr)
 
 
 def conjuncts(expr: "BoundExpr") -> list["BoundExpr"]:

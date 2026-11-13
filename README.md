@@ -42,7 +42,7 @@ py -3.13 -m venv .venv
 
 On Linux or macOS, use `.venv/bin/python` instead.
 
-Property-based tests run 50 examples each by default. For a deeper run (about 10x longer):
+Property-based tests run 30 examples each locally (`dev`), 100 in CI (`ci`). For a deep run:
 
 ```powershell
 $env:HYPOTHESIS_PROFILE = "thorough"

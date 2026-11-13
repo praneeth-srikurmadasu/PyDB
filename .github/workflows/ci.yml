@@ -31,3 +31,5 @@ jobs:
         run: python -m mypy
       - name: Pytest
         run: python -m pytest
+        env:
+          HYPOTHESIS_PROFILE: ci

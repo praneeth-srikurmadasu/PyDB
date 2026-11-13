@@ -14,6 +14,17 @@ class Operator(ABC):
     """
 
     columns: tuple[str, ...]
+    est_rows: float = 0.0
+    """Rows the planner expects this operator to produce."""
+    est_cost: float = 0.0
+    """The planner's cost estimate for producing all rows, including the children's cost."""
+
+    def label(self) -> str:
+        """One line describing the operator, for EXPLAIN."""
+        return type(self).__name__
+
+    def children(self) -> list["Operator"]:
+        return []
 
     @abstractmethod
     def open(self) -> None: ...

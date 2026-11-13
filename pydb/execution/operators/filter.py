@@ -7,10 +7,17 @@ from pydb.storage.tuple import Row
 
 
 class Filter(RidSource):
-    def __init__(self, child: Operator, predicate: Evaluator) -> None:
+    def __init__(self, child: Operator, predicate: Evaluator, description: str = "") -> None:
         self.child = child
         self.predicate = predicate
+        self.description = description
         self.columns = child.columns
+
+    def label(self) -> str:
+        return f"Filter {self.description}".rstrip()
+
+    def children(self) -> list[Operator]:
+        return [self.child]
 
     def open(self) -> None:
         self.child.open()

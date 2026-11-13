@@ -2,7 +2,8 @@
 
 The same deterministic data (with NULLs) is loaded into PyDB and into an in-memory SQLite
 database. Every query runs on PyDB under each join algorithm and with a sort memory budget
-small enough to force external sorting, and must give SQLite's answer. sqlite3 is used only
+small enough to force external sorting, before and after ANALYZE, and with index use and
+join reordering switched off, and must give SQLite's answer. sqlite3 is used only
 here, as an oracle; the engine never imports it.
 
 Queries avoid the few places where the two engines intentionally differ (LIKE is
@@ -106,6 +107,20 @@ QUERIES = [
     "SELECT o.id, c.name FROM orders o JOIN customers c ON o.customer_id = c.id "
     "ORDER BY c.name, o.id LIMIT 12",
     "SELECT id FROM orders ORDER BY LENGTH(note), id",
+    # predicates the optimizer can answer with an index
+    "SELECT id, qty FROM orders WHERE customer_id = 7 ORDER BY id",
+    "SELECT id FROM orders WHERE customer_id IN (3, 9, 9, 40) ORDER BY id",
+    "SELECT id FROM customers WHERE id BETWEEN 10 AND 14 OR id = 50 ORDER BY id",
+    "SELECT id FROM orders WHERE id > 390 AND id <= 395 AND qty IS NOT NULL ORDER BY id",
+    "SELECT id FROM orders WHERE id >= 2 * 199 ORDER BY id",
+    "SELECT c.name, o.id FROM customers c JOIN orders o ON o.customer_id = c.id "
+    "WHERE c.id = 12 ORDER BY o.id",
+    "SELECT COUNT(*) FROM orders o JOIN customers c ON o.customer_id = c.id "
+    "JOIN products p ON p.id = o.product_id WHERE p.price < 20 AND c.tier = 2",
+    "SELECT o.id FROM orders o LEFT JOIN customers c ON o.customer_id = c.id "
+    "WHERE c.id IS NULL ORDER BY o.id",
+    "SELECT o.id, c.city FROM orders o LEFT JOIN customers c ON o.customer_id = c.id "
+    "AND c.city = 'Oslo' WHERE o.id < 30 ORDER BY o.id",
 ]
 
 
@@ -147,6 +162,8 @@ SETTINGS = {
     "hash": PlannerSettings(join_strategy="hash"),
     "index_nested_loop": PlannerSettings(join_strategy="index_nested_loop"),
     "tiny_sort_memory": PlannerSettings(sort_memory_bytes=2048),
+    "analyzed": PlannerSettings(),
+    "no_indexes_no_reordering": PlannerSettings(use_indexes=False, reorder_joins=False),
 }
 
 
@@ -157,6 +174,9 @@ def pydb(
     path: Path = tmp_path_factory.mktemp("suite") / "suite.db"
     with Database(path, pool_size=16, settings=SETTINGS[request.param]) as db:
         load(db)
+        if request.param == "analyzed":
+            for table in ("customers", "products", "orders"):
+                db.execute(f"ANALYZE {table}")
         yield db
 
 

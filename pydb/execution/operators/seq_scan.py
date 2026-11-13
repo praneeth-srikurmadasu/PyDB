@@ -16,6 +16,9 @@ class SeqScan(RidSource):
         self.columns = tuple(table.column_names())
         self._rows: Iterator[tuple[RID, bytes]] | None = None
 
+    def label(self) -> str:
+        return f"SeqScan {self.table.name}"
+
     def open(self) -> None:
         self._rows = self.table.heap.scan()
 

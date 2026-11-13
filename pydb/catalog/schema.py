@@ -2,12 +2,16 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from pydb.errors import NotNullViolationError, TypeMismatchError, ValueTooLargeError
 from pydb.index.bplus_tree import BPlusTree
 from pydb.storage.table_heap import TableHeap
 from pydb.storage.tuple import Row, RowLayout
 from pydb.types import DataType, Value, check_value
+
+if TYPE_CHECKING:
+    from pydb.planner.stats import TableStats
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +68,7 @@ class TableInfo:
     columns: tuple[Column, ...]
     heap: TableHeap
     indexes: list[IndexInfo] = field(default_factory=list)
+    stats: "TableStats | None" = None
     layout: RowLayout = field(init=False)
 
     def __post_init__(self) -> None:

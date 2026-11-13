@@ -26,6 +26,12 @@ class Update(Operator):
         self.assignments = list(assignments)
         self._done = False
 
+    def label(self) -> str:
+        return f"Update {self.table.name}"
+
+    def children(self) -> list[Operator]:
+        return [self.source]
+
     def open(self) -> None:
         self._done = False
 

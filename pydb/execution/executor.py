@@ -1,5 +1,6 @@
 """Runs parsed statements: binds them, builds operator trees and collects results."""
 
+import time
 from dataclasses import dataclass, field
 
 from pydb.catalog.catalog import Catalog
@@ -11,7 +12,10 @@ from pydb.execution.operators.delete import Delete
 from pydb.execution.operators.insert import Insert
 from pydb.execution.operators.update import Update
 from pydb.planner.binder import Binder
-from pydb.planner.physical_plan import PlannerSettings, build_select, table_source
+from pydb.planner.explain import explain_lines, instrument
+from pydb.planner.optimizer import Optimizer
+from pydb.planner.physical_plan import PlannerSettings
+from pydb.planner.stats import collect
 from pydb.sql import ast
 from pydb.storage.tuple import Row
 from pydb.types import Value
@@ -32,6 +36,7 @@ class Executor:
         self.catalog = catalog
         self.binder = Binder(catalog)
         self.settings = settings or PlannerSettings()
+        self.optimizer = Optimizer(catalog.pool, self.settings)
 
     def execute(self, statement: ast.Statement) -> Result:
         match statement:
@@ -48,13 +53,13 @@ class Executor:
                 return self._run_write(Insert(bound.table, values), "INSERT")
             case ast.Update():
                 upd = self.binder.bind_update(statement)
-                source = table_source(upd.table, upd.where)
+                source = self.optimizer.access_path(upd.table, upd.where)
                 assignments = [(p, compile_expr(e)) for p, e in upd.assignments]
                 return self._run_write(Update(upd.table, source, assignments), "UPDATE")
             case ast.Delete():
                 dele = self.binder.bind_delete(statement)
                 return self._run_write(
-                    Delete(dele.table, table_source(dele.table, dele.where)), "DELETE"
+                    Delete(dele.table, self.optimizer.access_path(dele.table, dele.where)), "DELETE"
                 )
             case ast.CreateTable():
                 return self._create_table(statement)
@@ -80,8 +85,12 @@ class Executor:
                 return Result(("table",), names, len(names), f"{len(names)} tables")
             case ast.Describe():
                 return self._describe(statement.table)
-            case ast.Explain() | ast.Analyze():
-                raise NotSupportedError(f"{type(statement).__name__.upper()} is not supported yet")
+            case ast.Explain():
+                return self._explain(statement)
+            case ast.Analyze():
+                table = self.catalog.get_table(statement.table)
+                self.catalog.set_stats(table, collect(table))
+                return Result(message="ANALYZE")
             case ast.Begin() | ast.Commit() | ast.Rollback():
                 raise NotSupportedError(
                     "explicit transactions are not supported yet; each statement commits on its own"
@@ -91,8 +100,26 @@ class Executor:
     # ----------------------------------------------------------------- planning
 
     def plan_select(self, select: ast.Select) -> Operator:
-        bound = self.binder.bind_select(select)
-        return build_select(bound, self.catalog.pool, self.settings)
+        return self.optimizer.plan_select(self.binder.bind_select(select))
+
+    def _explain(self, statement: ast.Explain) -> Result:
+        plan = self.plan_select(statement.query)
+        if not statement.analyze:
+            lines = explain_lines(plan)
+        else:
+            pool = self.catalog.pool
+            collected = instrument(plan, pool)
+            before = pool.stats
+            started = time.perf_counter()
+            count = sum(1 for _ in plan.rows())
+            elapsed = time.perf_counter() - started
+            after = pool.stats
+            lines = explain_lines(plan, collected)
+            lines.append(
+                f"Execution: {count} rows in {elapsed * 1000:.3f} ms, "
+                f"buffer hits={after.hits - before.hits} misses={after.misses - before.misses}"
+            )
+        return Result(("QUERY PLAN",), [(line,) for line in lines], len(lines), "EXPLAIN")
 
     # ----------------------------------------------------------------- helpers
 

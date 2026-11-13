@@ -81,6 +81,12 @@ class HashAggregate(Operator):
         self._output: list[Row] = []
         self._position = 0
 
+    def label(self) -> str:
+        return f"HashAggregate [{', '.join(self.columns)}]"
+
+    def children(self) -> list[Operator]:
+        return [self.child]
+
     def open(self) -> None:
         groups: dict[tuple[Value, ...], list[_Accumulator]] = {}
         if not self.group_keys:

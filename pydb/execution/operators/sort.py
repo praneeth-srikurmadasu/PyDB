@@ -38,6 +38,10 @@ def compare_rows(keys: Sequence[SortKey], a: Row, b: Row) -> int:
     return 0
 
 
+def describe_keys(columns: Sequence[str], keys: Sequence[SortKey]) -> str:
+    return ", ".join(f"{columns[p]}{' DESC' if d else ''}" for p, d in keys)
+
+
 def sort_key(keys: Sequence[SortKey]) -> Callable[[Row], Any]:
     return functools.cmp_to_key(functools.partial(compare_rows, list(keys)))
 
@@ -62,6 +66,12 @@ class Sort(Operator):
         self._output: Iterator[Row] = iter(())
         self.runs_written = 0
         self.rows_sorted = 0
+
+    def label(self) -> str:
+        return f"Sort by {describe_keys(self.columns, self.keys)}"
+
+    def children(self) -> list[Operator]:
+        return [self.child]
 
     def open(self) -> None:
         self.close()
@@ -113,6 +123,12 @@ class TopN(Operator):
         self.keys = list(keys)
         self.count = count
         self._output: Iterator[Row] = iter(())
+
+    def label(self) -> str:
+        return f"TopN {self.count} by {describe_keys(self.columns, self.keys)}"
+
+    def children(self) -> list[Operator]:
+        return [self.child]
 
     def open(self) -> None:
         best = heapq.nsmallest(self.count, self.child.rows(), key=sort_key(self.keys))

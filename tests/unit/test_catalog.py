@@ -31,7 +31,7 @@ def catalog(tmp_path: Path) -> Iterator[Catalog]:
 
 def test_bootstrap_creates_self_describing_system_tables(catalog: Catalog) -> None:
     names = [t.name for t in catalog.tables(include_system=True)]
-    assert names == ["__columns__", "__indexes__", "__tables__"]
+    assert names == ["__columns__", "__indexes__", "__stats__", "__tables__"]
     assert catalog.tables() == []
     tables = catalog.get_table("__tables__")
     rows = [tables.layout.deserialize(d) for _, d in tables.heap.scan()]

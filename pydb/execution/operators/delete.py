@@ -14,6 +14,12 @@ class Delete(Operator):
         self.source = source
         self._done = False
 
+    def label(self) -> str:
+        return f"Delete {self.table.name}"
+
+    def children(self) -> list[Operator]:
+        return [self.source]
+
     def open(self) -> None:
         self._done = False
 

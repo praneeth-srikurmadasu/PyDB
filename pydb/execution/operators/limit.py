@@ -15,6 +15,13 @@ class Limit(Operator):
         self.columns = child.columns
         self._emitted = 0
 
+    def label(self) -> str:
+        offset = f" offset {self.offset}" if self.offset else ""
+        return f"Limit {'all' if self.limit is None else self.limit}{offset}"
+
+    def children(self) -> list[Operator]:
+        return [self.child]
+
     def open(self) -> None:
         self.child.open()
         self._emitted = 0

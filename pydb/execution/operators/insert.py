@@ -19,6 +19,9 @@ class Insert(Operator):
         self.input = [list(r) for r in rows]
         self._done = False
 
+    def label(self) -> str:
+        return f"Insert {self.table.name}"
+
     def open(self) -> None:
         self._done = False
 

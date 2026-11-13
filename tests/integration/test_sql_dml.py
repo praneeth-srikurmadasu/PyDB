@@ -181,7 +181,7 @@ def test_ddl_statements(db: Database) -> None:
 
 @pytest.mark.parametrize(
     "sql",
-    ["BEGIN", "COMMIT", "ROLLBACK", "EXPLAIN SELECT 1", "ANALYZE t"],
+    ["BEGIN", "COMMIT", "ROLLBACK"],
 )
 def test_unsupported_statements_say_so(db: Database, sql: str) -> None:
     with pytest.raises(NotSupportedError):

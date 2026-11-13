@@ -14,6 +14,9 @@ class Distinct(Operator):
         self.columns = child.columns
         self._seen: set[tuple[Value, ...]] = set()
 
+    def children(self) -> list[Operator]:
+        return [self.child]
+
     def open(self) -> None:
         self._seen = set()
         self.child.open()

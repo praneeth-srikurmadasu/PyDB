@@ -13,6 +13,12 @@ class Projection(Operator):
         self.columns = tuple(names)
         self.exprs = list(exprs)
 
+    def label(self) -> str:
+        return f"Projection [{', '.join(self.columns)}]"
+
+    def children(self) -> list[Operator]:
+        return [self.child]
+
     def open(self) -> None:
         self.child.open()
 

@@ -12,6 +12,9 @@ class Values(Operator):
         self.columns = tuple(columns)
         self._position = 0
 
+    def label(self) -> str:
+        return f"Values ({len(self._source)} row{'' if len(self._source) == 1 else 's'})"
+
     def open(self) -> None:
         self._position = 0
 

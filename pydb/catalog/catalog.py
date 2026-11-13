@@ -7,6 +7,12 @@
                  not_null BOOL, default_sql TEXT)
     __indexes__ (index_id INT, name TEXT, table_id INT, header_page INT,
                  is_unique BOOL, is_primary BOOL, columns TEXT)
+    __stats__   (table_id INT, position INT, row_count INT, page_count INT,
+                 distinct_count INT, null_count INT, min_sql TEXT, max_sql TEXT)
+
+``__stats__`` holds what ``ANALYZE`` measured: one row per column, plus a row with
+position -1 for the table's row and page counts. A database created before ``__stats__``
+existed gets it added when opened.
 
 The system tables describe themselves too (table ids 1-3). The database header page's
 ``catalog_root`` is the first page of ``__tables__``; scanning it finds the other two. The
@@ -27,6 +33,7 @@ from pydb.errors import (
     UnknownTableError,
 )
 from pydb.index.bplus_tree import BPlusTree
+from pydb.planner.stats import ColumnStats, TableStats
 from pydb.sql.ast import Literal
 from pydb.sql.parser import parse_expression
 from pydb.storage.buffer_pool import BufferPoolManager
@@ -39,6 +46,7 @@ INT, TEXT, BOOL = DataType.INT, DataType.TEXT, DataType.BOOL
 TABLES_TABLE = "__tables__"
 COLUMNS_TABLE = "__columns__"
 INDEXES_TABLE = "__indexes__"
+STATS_TABLE = "__stats__"
 
 _SYSTEM_SCHEMAS: dict[str, tuple[int, tuple[Column, ...]]] = {
     TABLES_TABLE: (
@@ -59,6 +67,12 @@ _SYSTEM_SCHEMAS: dict[str, tuple[int, tuple[Column, ...]]] = {
          Column("table_id", INT, not_null=True), Column("header_page", INT, not_null=True),
          Column("is_unique", BOOL, not_null=True), Column("is_primary", BOOL, not_null=True),
          Column("columns", TEXT, not_null=True)),
+    ),
+    STATS_TABLE: (
+        4,
+        (Column("table_id", INT, not_null=True), Column("position", INT, not_null=True),
+         Column("row_count", INT), Column("page_count", INT), Column("distinct_count", INT),
+         Column("null_count", INT), Column("min_sql", TEXT), Column("max_sql", TEXT)),
     ),
 }  # fmt: skip
 
@@ -146,6 +160,7 @@ class Catalog:
         for index in list(table.indexes):
             self._drop_index(table, index)
         self._delete_system_rows(COLUMNS_TABLE, lambda r: r[0] == table.table_id)
+        self._delete_system_rows(STATS_TABLE, lambda r: r[0] == table.table_id)
         self._delete_system_rows(TABLES_TABLE, lambda r: r[0] == table.table_id)
         table.heap.drop()
         del self._tables[name]
@@ -172,6 +187,21 @@ class Catalog:
                 f'cannot drop "{name}": it enforces the primary key of "{table.name}"'
             )
         self._drop_index(table, index)
+
+    def set_stats(self, table: TableInfo, stats: TableStats) -> None:
+        """Replace the stored statistics of ``table``."""
+        self._delete_system_rows(STATS_TABLE, lambda r: r[0] == table.table_id)
+        self._insert_system_row(
+            STATS_TABLE,
+            (table.table_id, -1, stats.row_count, stats.page_count, None, None, None, None),
+        )
+        for position, column in enumerate(stats.columns):
+            self._insert_system_row(
+                STATS_TABLE,
+                (table.table_id, position, None, None, column.distinct, column.nulls,
+                 _literal_sql(column.min), _literal_sql(column.max)),
+            )  # fmt: skip
+        table.stats = stats
 
     # ----------------------------------------------------------------- internals
 
@@ -234,6 +264,36 @@ class Catalog:
         self.pool.disk.set_catalog_root(self._tables[TABLES_TABLE].heap.first_page_id)
         self.pool.disk.sync()
 
+    def _add_system_table(self, name: str) -> None:
+        """Create a system table missing from a database made by an older version."""
+        columns = _SYSTEM_SCHEMAS[name][1]
+        table_id = 1 + max(t.table_id for t in self._tables.values())
+        table = TableInfo(table_id, name, columns, TableHeap.create(self.pool))
+        self._insert_system_row(TABLES_TABLE, (table_id, name, table.heap.first_page_id))
+        for position, column in enumerate(columns):
+            self._insert_system_row(COLUMNS_TABLE, _column_row(table_id, position, column))
+        self._tables[name] = table
+
+    def _load_stats(self, by_id: dict[int, TableInfo]) -> None:
+        stats_table = self._tables[STATS_TABLE]
+        table_level: dict[int, tuple[int, int]] = {}
+        columns: dict[int, dict[int, ColumnStats]] = {}
+        for _, data in stats_table.heap.scan():
+            r = stats_table.layout.deserialize(data)
+            table_id, position = _int(r[0]), _int(r[1])
+            if position < 0:
+                table_level[table_id] = (_int(r[2]), _int(r[3]))
+            else:
+                columns.setdefault(table_id, {})[position] = ColumnStats(
+                    _int(r[4]), _int(r[5]), _literal_value(r[6]), _literal_value(r[7])
+                )
+        for table_id, (rows, pages) in table_level.items():
+            table = by_id.get(table_id)
+            per_column = columns.get(table_id, {})
+            if table is not None and len(per_column) == len(table.columns):
+                ordered = tuple(per_column[i] for i in range(len(table.columns)))
+                table.stats = TableStats(rows, pages, ordered)
+
     def _load(self, root: int) -> None:
         tables_schema = _SYSTEM_SCHEMAS[TABLES_TABLE][1]
         bootstrap = TableInfo(1, TABLES_TABLE, tables_schema, TableHeap(self.pool, root))
@@ -256,7 +316,10 @@ class Catalog:
             columns = tuple(c for _, c in sorted(by_table.get(table_id, [])))
             self._tables[name] = TableInfo(table_id, name, columns, heaps[name])
 
+        if STATS_TABLE not in self._tables:
+            self._add_system_table(STATS_TABLE)
         by_id = {t.table_id: t for t in self._tables.values()}
+        self._load_stats(by_id)
         indexes_table = self._tables[INDEXES_TABLE]
         for _, data in indexes_table.heap.scan():
             r = indexes_table.layout.deserialize(data)
@@ -266,6 +329,19 @@ class Catalog:
                 BPlusTree(self.pool, _int(r[3])),
             )  # fmt: skip
             by_id[index.table_id].indexes.append(index)
+
+
+def _literal_sql(value: Value) -> str | None:
+    return None if value is None else Literal(value).to_sql()
+
+
+def _literal_value(sql: Value) -> Value:
+    if sql is None:
+        return None
+    literal = parse_expression(str(sql))
+    if not isinstance(literal, Literal):
+        raise CorruptPageError(f"stored value {sql!r} is not a literal")
+    return literal.value
 
 
 def _column_row(table_id: int, position: int, column: Column) -> Row:

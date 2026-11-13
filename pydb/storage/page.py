@@ -41,6 +41,12 @@ class PageType(IntEnum):
     """On the free list, waiting to be reused."""
     TABLE_HEAP = 3
     """A slotted page holding rows of one table."""
+    BTREE_HEADER = 4
+    """The fixed entry point of a B+ tree index: root page id and key format."""
+    BTREE_INTERNAL = 5
+    """A B+ tree node holding separator keys and child page ids."""
+    BTREE_LEAF = 6
+    """A B+ tree node holding keys and RIDs, linked to its neighbouring leaves."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,7 +13,7 @@ Every page begins with a 24-byte header (`pydb/storage/page.py`), little-endian:
 | Offset | Size | Field | Notes |
 |---|---|---|---|
 | 0 | 4 | `page_id` | The page's own id; a mismatch on read means a misdirected write |
-| 4 | 1 | `page_type` | `EMPTY` = 0, `HEADER` = 1, `FREE` = 2, `TABLE_HEAP` = 3 |
+| 4 | 1 | `page_type` | `EMPTY` = 0, `HEADER` = 1, `FREE` = 2, `TABLE_HEAP` = 3, `BTREE_HEADER` = 4, `BTREE_INTERNAL` = 5, `BTREE_LEAF` = 6 (see indexing.md) |
 | 5 | 3 | reserved | |
 | 8 | 8 | `page_lsn` | LSN of the last log record applied to the page |
 | 16 | 4 | checksum | CRC32 (`zlib.crc32`) of bytes `[0:16]` and `[20:4096]` |

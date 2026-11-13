@@ -17,6 +17,10 @@ class ValueTooLargeError(PyDBError):
     """A value is outside the range its type can represent (e.g. TEXT over its byte limit)."""
 
 
+class DuplicateKeyError(PyDBError):
+    """An insert would put a second entry with the same key into a unique index."""
+
+
 class StorageError(PyDBError):
     """A failure in the storage layer (files, pages, rows)."""
 

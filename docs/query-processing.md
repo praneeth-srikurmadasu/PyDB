@@ -91,3 +91,79 @@ they are not plain lower-case names or are reserved, and binary operators are su
 spaces (so `a - -1` never becomes the comment `a--1`). The property test
 `tests/property/test_sql_roundtrip.py` checks `parse(node.to_sql()) == node` for random
 expression trees and statements.
+
+## Binder
+
+`pydb/planner/binder.py` checks meaning against the catalog and produces bound statements
+(`BoundSelect`, `BoundInsert`, `BoundUpdate`, `BoundDelete`) whose expressions use row
+positions instead of names.
+
+- **Names.** A `Scope` lists the visible columns as `(table alias, column, type)`. A column
+  reference resolves to exactly one entry: none raises `UnknownColumnError` (listing the
+  available columns), several raise `AmbiguousColumnError`. `*` and `t.*` expand here.
+- **Types.** Every bound expression has a result type; an untyped `NULL` literal is
+  compatible with anything.
+
+| Expression | Operands | Result |
+|---|---|---|
+| `+ - * / %`, unary `-` | INT or FLOAT | INT if both INT, else FLOAT |
+| `\|\|`, `LIKE` | TEXT | TEXT / BOOL |
+| `= != < <= > >=`, `IN`, `BETWEEN` | same type, or INT with FLOAT | BOOL |
+| `AND OR NOT` | BOOL | BOOL |
+| `LOWER`, `UPPER` / `LENGTH` | TEXT | TEXT / INT |
+| `ABS` | INT or FLOAT | same |
+| `COALESCE` | mutually comparable | their common type |
+
+  `WHERE` must be BOOL. A value assigned to a column must have the column's type, except
+  that INT is accepted for FLOAT.
+
+## Expression evaluation
+
+`compile_expr` (`pydb/execution/expressions.py`) turns a bound expression into a closure once
+per statement; evaluating a row is then a chain of calls with no per-row type dispatch.
+
+**NULL semantics (three-valued logic).** NULL means unknown:
+
+- comparisons, arithmetic, `||`, `LIKE` and scalar functions return NULL if an input is NULL
+  (`NULL = NULL` is NULL);
+- `AND` is FALSE if either side is FALSE, else NULL if either is NULL (`NULL AND FALSE` is
+  FALSE); `OR` is TRUE if either side is TRUE, else NULL if either is NULL; `NOT NULL` is NULL;
+- `x IN (...)` is TRUE on a match, otherwise NULL if `x` or any item is NULL, otherwise FALSE;
+- `IS [NOT] NULL` is never NULL; `COALESCE` returns its first non-NULL argument;
+- `WHERE` keeps a row only when the predicate is TRUE.
+
+`tests/unit/test_null_semantics.py` covers each rule.
+
+**Arithmetic.** INT results outside the 64-bit range raise `ValueTooLargeError`. Integer `/`
+truncates toward zero and `%` takes the sign of the dividend (`-7 / 2 = -3`,
+`-7 % 2 = -1`), as in SQL rather than Python. Division by zero raises `DivisionByZeroError`.
+`LIKE` uses `%` (any run) and `_` (one character), case-sensitively.
+
+## Executor
+
+Operators (`pydb/execution/operators/`) follow the Volcano model: `open()`, then `next()` until
+it returns None, then `close()`; `columns` names the output. `Operator.rows()` runs one to
+completion and always closes it.
+
+| Operator | Does |
+|---|---|
+| `SeqScan` | every row of a table, in page order |
+| `Filter` | rows whose predicate is TRUE |
+| `Projection` | computes the output expressions |
+| `Values` | fixed rows (the input of `SELECT` without `FROM`) |
+| `Insert`, `Update`, `Delete` | write rows; return one row holding the count |
+
+`SeqScan` and `Filter` can also report each row's RID (`next_with_rid`), which `Update` and
+`Delete` use. Both collect their target rows before changing any: otherwise an `UPDATE`
+that moves a row to a later page would meet it again in the same scan and update it twice
+(the Halloween problem).
+
+All writes go through `TableWriter`, which validates rows, checks unique indexes before
+writing, keeps every index in step with the heap, and records an undo action per change. If
+any row of a statement fails, the statement's earlier changes are undone, so a failed
+multi-row `INSERT` or `UPDATE` changes nothing. Unique checks are made row by row, so an
+`UPDATE` that shifts keys (`SET id = id + 1`) can fail on a transient collision even when the
+final keys would be distinct.
+
+`pydb/catalog/integrity.py`'s `check_table` verifies that every index holds exactly one
+correct entry per heap row; the tests call it after DML.

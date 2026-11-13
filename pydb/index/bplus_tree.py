@@ -234,6 +234,18 @@ class BPlusTree:
                 raise CorruptPageError(f"leaf chain reaches non-leaf page {node.page_id}")
             leaf, start = node, 0
 
+    def drop(self) -> None:
+        """Return every node page and the header page to the free list."""
+        with self._latch.write():
+            pending = [self._root]
+            while pending:
+                page_id = pending.pop()
+                node = self._load(page_id)
+                if isinstance(node, InternalNode):
+                    pending.extend(node.children)
+                self.pool.delete_page(page_id)
+            self.pool.delete_page(self.header_page_id)
+
     def __len__(self) -> int:
         return sum(1 for _ in self.range_scan())
 

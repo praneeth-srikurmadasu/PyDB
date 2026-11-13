@@ -90,6 +90,11 @@ class TableHeap:
                 page_id = sp.next_page_id
             yield from rows
 
+    def drop(self) -> None:
+        """Return every page of the table to the free list. The heap is unusable afterwards."""
+        for page_id in list(self.page_ids()):
+            self.pool.delete_page(page_id)
+
     def page_ids(self) -> Iterator[int]:
         page_id = self.first_page_id
         while page_id != INVALID_PAGE_ID:

@@ -49,3 +49,43 @@ class RecordNotFoundError(StorageError):
 
 class BufferPoolFullError(StorageError):
     """Every frame in the buffer pool is pinned, so no page can be brought in."""
+
+
+class CatalogError(PyDBError):
+    """A problem with schema objects: tables, columns, indexes, functions."""
+
+
+class UnknownTableError(CatalogError):
+    pass
+
+
+class UnknownColumnError(CatalogError):
+    pass
+
+
+class AmbiguousColumnError(CatalogError):
+    pass
+
+
+class UnknownFunctionError(CatalogError):
+    pass
+
+
+class DuplicateObjectError(CatalogError):
+    """A table, index or column with this name already exists."""
+
+
+class ConstraintViolationError(PyDBError):
+    """A write would break a NOT NULL, UNIQUE or PRIMARY KEY constraint."""
+
+
+class NotNullViolationError(ConstraintViolationError):
+    pass
+
+
+class UniqueViolationError(ConstraintViolationError):
+    pass
+
+
+class DivisionByZeroError(PyDBError):
+    pass

@@ -14,6 +14,10 @@ Work in progress.
 pydb> CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL);
 pydb> INSERT INTO users VALUES (1, 'ann'), (2, 'bob');
 pydb> SELECT name FROM users WHERE id > 1;
+pydb> CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, total FLOAT);
+pydb> INSERT INTO orders VALUES (1, 1, 9.5), (2, 1, 20), (3, 2, 4);
+pydb> SELECT u.name, COUNT(*) AS n, SUM(o.total) FROM users u
+  ...> JOIN orders o ON o.user_id = u.id GROUP BY u.name ORDER BY n DESC;
 ```
 
 Meta commands: `.tables`, `.schema [table]`, `.timer on|off`, `.help`, `.quit`.

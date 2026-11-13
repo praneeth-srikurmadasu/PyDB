@@ -15,7 +15,7 @@ import math
 import operator
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from pydb.errors import DivisionByZeroError, ValueTooLargeError
@@ -34,7 +34,7 @@ class BoundLiteral:
 @dataclass(frozen=True, slots=True)
 class BoundColumn:
     index: int
-    type: DataType
+    type: DataType | None
     name: str
 
 
@@ -103,6 +103,82 @@ BoundExpr = (
     | BoundLike
     | BoundFunction
 )
+
+
+def children(expr: "BoundExpr") -> tuple["BoundExpr", ...]:
+    match expr:
+        case BoundUnary(operand=operand) | BoundIsNull(operand=operand):
+            return (operand,)
+        case BoundBinary(left=left, right=right):
+            return (left, right)
+        case BoundInList(operand=operand, items=items):
+            return (operand, *items)
+        case BoundBetween(operand=operand, low=low, high=high):
+            return (operand, low, high)
+        case BoundLike(operand=operand, pattern=pattern):
+            return (operand, pattern)
+        case BoundFunction(args=args):
+            return args
+    return ()
+
+
+def column_refs(expr: "BoundExpr") -> set[int]:
+    """Positions of every input column the expression reads."""
+    if isinstance(expr, BoundColumn):
+        return {expr.index}
+    refs: set[int] = set()
+    for child in children(expr):
+        refs |= column_refs(child)
+    return refs
+
+
+def shift_columns(expr: "BoundExpr", offset: int) -> "BoundExpr":
+    """The same expression reading column ``i + offset`` wherever it read column ``i``."""
+    match expr:
+        case BoundColumn(index=index):
+            return replace(expr, index=index + offset)
+        case BoundUnary(operand=operand) | BoundIsNull(operand=operand):
+            return replace(expr, operand=shift_columns(operand, offset))
+        case BoundBinary(left=left, right=right):
+            return replace(
+                expr, left=shift_columns(left, offset), right=shift_columns(right, offset)
+            )
+        case BoundInList(operand=operand, items=items):
+            return replace(
+                expr,
+                operand=shift_columns(operand, offset),
+                items=tuple(shift_columns(i, offset) for i in items),
+            )
+        case BoundBetween(operand=operand, low=low, high=high):
+            return replace(
+                expr,
+                operand=shift_columns(operand, offset),
+                low=shift_columns(low, offset),
+                high=shift_columns(high, offset),
+            )
+        case BoundLike(operand=operand, pattern=pattern):
+            return replace(
+                expr, operand=shift_columns(operand, offset), pattern=shift_columns(pattern, offset)
+            )
+        case BoundFunction(args=args):
+            return replace(expr, args=tuple(shift_columns(a, offset) for a in args))
+    return expr
+
+
+def conjuncts(expr: "BoundExpr") -> list["BoundExpr"]:
+    """Split ``a AND b AND c`` into ``[a, b, c]``."""
+    if isinstance(expr, BoundBinary) and expr.op == "AND":
+        return conjuncts(expr.left) + conjuncts(expr.right)
+    return [expr]
+
+
+def and_all(exprs: list["BoundExpr"]) -> "BoundExpr | None":
+    if not exprs:
+        return None
+    result = exprs[0]
+    for expr in exprs[1:]:
+        result = BoundBinary("AND", result, expr, DataType.BOOL)
+    return result
 
 
 # --------------------------------------------------------------------- three-valued logic

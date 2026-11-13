@@ -3,18 +3,15 @@
 from dataclasses import dataclass, field
 
 from pydb.catalog.catalog import Catalog
-from pydb.catalog.schema import Column, TableInfo
+from pydb.catalog.schema import Column
 from pydb.errors import CatalogError, NotSupportedError, TypeMismatchError, UnknownColumnError
 from pydb.execution.expressions import BoundExpr, compile_expr
-from pydb.execution.operators.base import Operator, RidSource
+from pydb.execution.operators.base import Operator
 from pydb.execution.operators.delete import Delete
-from pydb.execution.operators.filter import Filter
 from pydb.execution.operators.insert import Insert
-from pydb.execution.operators.projection import Projection
-from pydb.execution.operators.seq_scan import SeqScan
 from pydb.execution.operators.update import Update
-from pydb.execution.operators.values import Values
 from pydb.planner.binder import Binder
+from pydb.planner.physical_plan import PlannerSettings, build_select, table_source
 from pydb.sql import ast
 from pydb.storage.tuple import Row
 from pydb.types import Value
@@ -31,9 +28,10 @@ class Result:
 
 
 class Executor:
-    def __init__(self, catalog: Catalog) -> None:
+    def __init__(self, catalog: Catalog, settings: PlannerSettings | None = None) -> None:
         self.catalog = catalog
         self.binder = Binder(catalog)
+        self.settings = settings or PlannerSettings()
 
     def execute(self, statement: ast.Statement) -> Result:
         match statement:
@@ -50,13 +48,13 @@ class Executor:
                 return self._run_write(Insert(bound.table, values), "INSERT")
             case ast.Update():
                 upd = self.binder.bind_update(statement)
-                source = self._table_source(upd.table, upd.where)
+                source = table_source(upd.table, upd.where)
                 assignments = [(p, compile_expr(e)) for p, e in upd.assignments]
                 return self._run_write(Update(upd.table, source, assignments), "UPDATE")
             case ast.Delete():
                 dele = self.binder.bind_delete(statement)
                 return self._run_write(
-                    Delete(dele.table, self._table_source(dele.table, dele.where)), "DELETE"
+                    Delete(dele.table, table_source(dele.table, dele.where)), "DELETE"
                 )
             case ast.CreateTable():
                 return self._create_table(statement)
@@ -94,17 +92,7 @@ class Executor:
 
     def plan_select(self, select: ast.Select) -> Operator:
         bound = self.binder.bind_select(select)
-        source: Operator
-        if bound.table is None:
-            source = Values([()])
-        else:
-            source = self._table_source(bound.table, bound.where)
-        names = [name for name, _ in bound.outputs]
-        return Projection(source, names, [compile_expr(e) for _, e in bound.outputs])
-
-    def _table_source(self, table: TableInfo, where: BoundExpr | None) -> RidSource:
-        scan = SeqScan(table)
-        return scan if where is None else Filter(scan, compile_expr(where))
+        return build_select(bound, self.catalog.pool, self.settings)
 
     # ----------------------------------------------------------------- helpers
 

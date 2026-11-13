@@ -8,7 +8,8 @@ from pydb.catalog.catalog import Catalog
 from pydb.errors import (
     AmbiguousColumnError,
     CatalogError,
-    NotSupportedError,
+    DuplicateObjectError,
+    GroupingError,
     TypeMismatchError,
     UnknownColumnError,
     UnknownFunctionError,
@@ -91,9 +92,17 @@ def test_result_types(binder: Binder) -> None:
         ("SELECT FOO(id) FROM users", UnknownFunctionError, "function FOO does not exist"),
         ("SELECT LOWER(name, name) FROM users", TypeMismatchError, "exactly one argument"),
         ("SELECT *", UnknownColumnError, "needs a FROM clause"),
-        ("SELECT COUNT(*) FROM users", NotSupportedError, "aggregate function COUNT"),
-        ("SELECT id FROM users ORDER BY id", NotSupportedError, "ORDER BY"),
-        ("SELECT id FROM users u JOIN users v ON TRUE", NotSupportedError, "JOIN"),
+        ("SELECT name, COUNT(*) FROM users", GroupingError, 'column "name" must appear'),
+        ("SELECT id FROM users WHERE COUNT(*) > 1", GroupingError, "not allowed here"),
+        ("SELECT MAX(MIN(id)) FROM users", GroupingError, "cannot be nested"),
+        ("SELECT * FROM users GROUP BY id", GroupingError, "SELECT * cannot be used"),
+        ("SELECT SUM(name) FROM users", TypeMismatchError, "SUM expects FLOAT or INT"),
+        ("SELECT id FROM users ORDER BY 5", UnknownColumnError, "ORDER BY position 5"),
+        ("SELECT DISTINCT id FROM users ORDER BY name", GroupingError, "SELECT DISTINCT"),
+        ("SELECT id FROM users u JOIN users u ON TRUE", DuplicateObjectError, '"u" specified'),
+        ("SELECT id FROM users u JOIN users v ON TRUE", AmbiguousColumnError, '"id" is ambiguous'),
+        ("SELECT u.id FROM users u JOIN users v ON u.name", TypeMismatchError, "JOIN ON expects"),
+        ("SELECT id FROM users GROUP BY id HAVING name = 'x'", GroupingError, '"name" must'),
     ],
 )
 def test_select_errors(binder: Binder, sql: str, error: type[Exception], message: str) -> None:
@@ -141,3 +150,34 @@ def test_system_tables_are_read_only(binder: Binder) -> None:
     select(binder, "SELECT name FROM __tables__")
     with pytest.raises(CatalogError, match="read-only"):
         binder.bind_delete(parsed("DELETE FROM __tables__", ast.Delete))
+
+
+def test_aggregate_query_binding(binder: Binder) -> None:
+    bound = binder.bind_select(
+        parsed(
+            "SELECT name, COUNT(*), SUM(score) + 1 AS s FROM users GROUP BY name "
+            "HAVING COUNT(*) > 1 ORDER BY s DESC, MAX(id)",
+            ast.Select,
+        )
+    )
+    assert bound.grouped
+    assert [a.function for a in bound.aggregates] == ["COUNT", "SUM", "MAX"]  # COUNT(*) shared
+    assert [name for name, _ in bound.outputs] == ["name", "count", "s"]
+    assert bound.order_by == ((2, True), (3, False))  # alias s, then hidden MAX(id)
+    assert len(bound.hidden) == 1
+
+
+def test_order_by_resolution(binder: Binder) -> None:
+    bound = binder.bind_select(
+        parsed("SELECT name AS n, id FROM users ORDER BY 2, n, users.score DESC, id", ast.Select)
+    )
+    assert bound.order_by == ((1, False), (0, False), (2, True), (1, False))
+    assert len(bound.hidden) == 1  # score is not selected
+
+
+def test_join_scope(binder: Binder) -> None:
+    bound = binder.bind_select(
+        parsed("SELECT a.id, b.name FROM users a LEFT JOIN users b ON a.id = b.id", ast.Select)
+    )
+    assert len(bound.joins) == 1 and bound.joins[0].left_width == 4
+    assert [e.index for _, e in bound.outputs if isinstance(e, BoundColumn)] == [0, 5]

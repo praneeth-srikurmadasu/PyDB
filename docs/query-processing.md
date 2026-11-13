@@ -116,6 +116,20 @@ positions instead of names.
 
   `WHERE` must be BOOL. A value assigned to a column must have the column's type, except
   that INT is accepted for FLOAT.
+- **Joins.** Each `JOIN` appends its table's columns to the scope, so `ON` and everything
+  after it see `left columns..., right columns...`. Two tables with the same label need
+  aliases.
+- **Aggregation.** A query is grouped if it has `GROUP BY`, `HAVING` or any aggregate call.
+  Then the select list, `HAVING` and `ORDER BY` are bound against the *aggregate row*
+  (group-by values, then aggregate results): an expression equal to a `GROUP BY` expression
+  becomes a reference to it, an aggregate call becomes a reference to its result, and any
+  other column reference raises `GroupingError` ("must appear in the GROUP BY clause or be
+  used in an aggregate function"). Aggregates may not appear in `WHERE`, `GROUP BY`, `ON` or
+  inside another aggregate. Identical aggregate calls are computed once.
+- **ORDER BY** resolves each key, in order of preference, as a 1-based position in the select
+  list, an output column name or alias, an expression equal to a select-list expression, or
+  any other expression over the input. The last kind is computed as a *hidden* column and
+  removed after sorting; it is not allowed with `DISTINCT`.
 
 ## Expression evaluation
 
@@ -153,6 +167,15 @@ completion and always closes it.
 | `Values` | fixed rows (the input of `SELECT` without `FROM`) |
 | `Insert`, `Update`, `Delete` | write rows; return one row holding the count |
 
+| `NestedLoopJoin` | for each outer row, rescans the inner input; any `ON` condition |
+| `HashJoin` | builds a hash table of the inner input on its join keys, probes it per outer row |
+| `IndexNestedLoopJoin` | for each outer row, searches an index of the inner table |
+| `HashAggregate` | groups rows in a hash table and computes `COUNT SUM AVG MIN MAX` |
+| `Distinct` | drops repeated rows (NULLs are equal here) |
+| `Sort` | sorts in memory, or externally when the rows exceed its memory budget |
+| `TopN` | `ORDER BY ... LIMIT n`: keeps only the best `n` rows |
+| `Limit` | skips `OFFSET` rows and stops after `LIMIT` rows |
+
 `SeqScan` and `Filter` can also report each row's RID (`next_with_rid`), which `Update` and
 `Delete` use. Both collect their target rows before changing any: otherwise an `UPDATE`
 that moves a row to a later page would meet it again in the same scan and update it twice
@@ -167,3 +190,62 @@ final keys would be distinct.
 
 `pydb/catalog/integrity.py`'s `check_table` verifies that every index holds exactly one
 correct entry per heap row; the tests call it after DML.
+
+## SELECT plans
+
+`pydb/planner/physical_plan.py` builds this pipeline from a bound `SELECT`, leaving out the
+stages a query does not need:
+
+```
+SeqScan -> Join ... -> Filter(WHERE) -> HashAggregate -> Filter(HAVING)
+        -> Projection -> Distinct -> Sort | TopN -> Limit -> Projection (drop hidden columns)
+```
+
+### Joins
+
+All three algorithms support `INNER` and `LEFT` joins and produce the same rows. For a
+`LEFT` join, an outer row with no match is returned once, padded with NULLs.
+
+| Algorithm | Cost | Needs |
+|---|---|---|
+| Nested loop | outer x inner row comparisons | nothing |
+| Hash | outer + inner, inner held in memory | an equality between the two sides |
+| Index nested loop | outer x (index lookup) | an equality on the leading column(s) of an inner index |
+
+The `ON` clause is split into its `AND`ed parts. A part of the form
+`outer_expression = inner_expression` is a join key; the rest is a residual predicate
+checked on each candidate pair. Keys containing NULL never match, because `NULL = x` is
+never TRUE. The planner picks an index nested loop if an index fits, else a hash join if
+there is a key, else a nested loop. `PlannerSettings(join_strategy=...)` forces one (falling
+back down the same list when it does not apply); the query-suite tests run every query
+under each.
+
+### Aggregation
+
+`HashAggregate` keeps one set of accumulators per distinct group key. `COUNT(*)` counts
+rows; the other aggregates skip NULLs, and `SUM`, `AVG`, `MIN` and `MAX` of no values are
+NULL. `AVG` is FLOAT; `SUM` of INT is INT (overflow is an error). Without `GROUP BY` the input
+is one group, so an empty table still gives one row (`COUNT(*)` = 0). NULL group keys form
+one group. Groups are output in order of first appearance.
+
+### Sorting
+
+`Sort` buffers rows until their serialized size exceeds `sort_memory_bytes` (2 MiB by
+default). Then it sorts the buffer and writes it as a *run* to a temporary table heap, which
+uses ordinary pages through the buffer pool. At the end, the runs and the last in-memory
+buffer are combined by a k-way merge (`heapq.merge`), which reads every run sequentially, and
+the run pages are freed. Memory use is bounded by the budget plus one row per run, so a sort
+can handle far more data than the buffer pool holds. A row wider than a page cannot be
+written to a run.
+
+NULLs sort first in ascending order and last in descending order, as in SQLite and in PyDB's
+index keys. Sorting is stable. `TopN` uses `heapq.nsmallest`, holding only `LIMIT + OFFSET`
+rows.
+
+### Checking against SQLite
+
+`tests/integration/test_query_suite.py` loads the same data, with NULLs, into PyDB and into
+the standard library's `sqlite3`, then runs filters, joins (including three-table and
+self joins), aggregates, `DISTINCT`, `ORDER BY` and `LIMIT`/`OFFSET` queries on both. Every
+query runs under each join algorithm and with a 2 KB sort budget that forces external
+sorting. sqlite3 is only an oracle in that test; the engine does not use it.

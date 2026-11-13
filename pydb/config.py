@@ -19,3 +19,6 @@ MAX_TEXT_BYTES: Final[int] = 1024
 
 MAX_KEY_TEXT_BYTES: Final[int] = 64
 """Largest UTF-8 encoded TEXT value that fits in a fixed-size B+ tree key slot."""
+
+SORT_MEMORY_BYTES: Final[int] = 2 * 1024 * 1024
+"""Rows a sort may hold in memory (by serialized size) before spilling sorted runs to disk."""

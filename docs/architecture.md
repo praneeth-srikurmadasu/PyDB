@@ -27,7 +27,9 @@ Each layer only calls the one below it. Everything is in one process and one fil
 2. **Bind** (`Binder.bind_select`): `users` is looked up in the catalog; `name` and `age`
    become row positions 1 and 3; `age > 30` is checked (INT compared with INT) and typed
    BOOL; the WHERE clause must be BOOL.
-3. **Plan** (`Executor.plan_select`): `Projection([col 1]) ← Filter(col 3 > 30) ← SeqScan(users)`.
+3. **Plan** (`build_select` in `pydb/planner/physical_plan.py`):
+   `Projection([col 1]) ← Filter(col 3 > 30) ← SeqScan(users)`. Joins, grouping, sorting
+   and limits add stages to this pipeline (see query-processing.md).
    Bound expressions are compiled once into Python closures.
 4. **Execute**: `Projection.next()` asks `Filter.next()`, which asks `SeqScan.next()` until a
    row's predicate is TRUE. `SeqScan` walks the table's page chain through the buffer pool,

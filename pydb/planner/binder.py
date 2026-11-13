@@ -14,7 +14,9 @@ from pydb.catalog.schema import TableInfo
 from pydb.errors import (
     AmbiguousColumnError,
     CatalogError,
-    NotSupportedError,
+    DuplicateObjectError,
+    GroupingError,
+    PyDBError,
     TypeMismatchError,
     UnknownColumnError,
     UnknownFunctionError,
@@ -86,10 +88,73 @@ class Scope:
 
 
 @dataclass(frozen=True, slots=True)
+class BoundJoin:
+    kind: str  # "INNER" or "LEFT"
+    table: TableInfo
+    left_width: int  # columns produced by everything to the join's left
+    on: BoundExpr  # over the combined row: left columns, then this table's
+
+
+@dataclass(frozen=True, slots=True)
+class BoundAggregate:
+    function: str  # COUNT, SUM, AVG, MIN, MAX
+    arg: BoundExpr | None  # None for COUNT(*)
+    type: DataType | None
+
+
+@dataclass(frozen=True, slots=True)
 class BoundSelect:
+    """A bound SELECT. Expressions are relative to the row at their stage of the pipeline.
+
+    ``where`` and ``group_by`` and aggregate arguments read the joined input row. When
+    ``grouped``, ``having`` and ``outputs`` read the aggregate row (group-by values, then
+    aggregate results). ``order_by`` reads the projected row, which is ``outputs`` followed by
+    ``hidden`` (expressions needed only for sorting, removed before results are returned).
+    """
+
     table: TableInfo | None
+    joins: tuple[BoundJoin, ...]
     where: BoundExpr | None
+    grouped: bool
+    group_by: tuple[BoundExpr, ...]
+    aggregates: tuple[BoundAggregate, ...]
+    having: BoundExpr | None
     outputs: tuple[tuple[str, BoundExpr], ...]
+    hidden: tuple[BoundExpr, ...]
+    order_by: tuple[tuple[int, bool], ...]  # (projected column, descending)
+    distinct: bool
+    limit: int | None
+    offset: int | None
+
+    @property
+    def projected_types(self) -> list[DataType | None]:
+        return [e.type for _, e in self.outputs] + [e.type for e in self.hidden]
+
+
+class AggregateContext:
+    """Binding inside an aggregate query: maps expressions onto the aggregate row."""
+
+    def __init__(self, binder: "Binder", scope: Scope, group_by: Sequence[BoundExpr]) -> None:
+        self.binder = binder
+        self.scope = scope
+        self.group_by = list(group_by)
+        self.aggregates: list[BoundAggregate] = []
+
+    def match_group(self, expr: ast.Expr) -> BoundColumn | None:
+        try:
+            bound = self.binder.bind_expr(expr, self.scope)
+        except PyDBError:
+            return None
+        for i, group in enumerate(self.group_by):
+            if bound == group:
+                return BoundColumn(i, group.type, _output_name(expr))
+        return None
+
+    def add(self, aggregate: BoundAggregate, name: str) -> BoundColumn:
+        if aggregate not in self.aggregates:
+            self.aggregates.append(aggregate)
+        index = len(self.group_by) + self.aggregates.index(aggregate)
+        return BoundColumn(index, aggregate.type, name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,30 +184,110 @@ class Binder:
     # ----------------------------------------------------------------- statements
 
     def bind_select(self, select: ast.Select) -> BoundSelect:
-        for present, feature in (
-            (select.joins, "JOIN"),
-            (select.group_by, "GROUP BY"),
-            (select.having, "HAVING"),
-            (select.order_by, "ORDER BY"),
-            (select.limit is not None, "LIMIT"),
-            (select.distinct, "DISTINCT"),
-        ):
-            if present:
-                raise NotSupportedError(f"{feature} is not supported yet")
         table: TableInfo | None = None
         scope = Scope()
+        joins: list[BoundJoin] = []
         if select.from_table is not None:
             table = self.catalog.get_table(select.from_table.name)
             scope = Scope.for_table(table, select.from_table.alias)
+            labels = {select.from_table.alias or table.name}
+            for join in select.joins:
+                right = self.catalog.get_table(join.table.name)
+                label = join.table.alias or right.name
+                if label in labels:
+                    raise DuplicateObjectError(
+                        f'table name "{label}" specified more than once; give it an alias'
+                    )
+                labels.add(label)
+                left_width = len(scope.columns)
+                scope = Scope(scope.columns + Scope.for_table(right, join.table.alias).columns)
+                on = self._bind_predicate(join.on, scope, "JOIN ON")
+                assert on is not None
+                joins.append(BoundJoin(join.kind, right, left_width, on))
+
+        where = self._bind_predicate(select.where, scope, "WHERE")
+        group_by = tuple(self.bind_expr(e, scope) for e in select.group_by)
+        grouped = (
+            bool(group_by)
+            or select.having is not None
+            or any(
+                _contains_aggregate(e)
+                for e in [i.expr for i in select.items if not isinstance(i.expr, ast.Star)]
+                + [o.expr for o in select.order_by]
+            )
+        )
+        context = AggregateContext(self, scope, group_by) if grouped else None
+
         outputs: list[tuple[str, BoundExpr]] = []
         for item in select.items:
             if isinstance(item.expr, ast.Star):
+                if grouped:
+                    raise GroupingError("SELECT * cannot be used with GROUP BY or aggregates")
                 outputs.extend(self._expand_star(item.expr, scope))
                 continue
-            bound = self.bind_expr(item.expr, scope)
+            bound = self.bind_expr(item.expr, scope, context)
             outputs.append((item.alias or _output_name(item.expr), bound))
-        where = self._bind_predicate(select.where, scope, "WHERE")
-        return BoundSelect(table, where, tuple(outputs))
+        having = None
+        if select.having is not None:
+            having = self.bind_expr(select.having, scope, context)
+            _require(having, {DataType.BOOL}, "HAVING")
+
+        hidden: list[BoundExpr] = []
+        order_by: list[tuple[int, bool]] = []
+        for order in select.order_by:
+            position = self._order_position(
+                order.expr, outputs, hidden, scope, context, select.distinct
+            )
+            order_by.append((position, order.descending))
+
+        return BoundSelect(
+            table=table,
+            joins=tuple(joins),
+            where=where,
+            grouped=grouped,
+            group_by=group_by,
+            aggregates=tuple(context.aggregates) if context else (),
+            having=having,
+            outputs=tuple(outputs),
+            hidden=tuple(hidden),
+            order_by=tuple(order_by),
+            distinct=select.distinct,
+            limit=select.limit,
+            offset=select.offset,
+        )
+
+    def _order_position(
+        self,
+        expr: ast.Expr,
+        outputs: list[tuple[str, BoundExpr]],
+        hidden: list[BoundExpr],
+        scope: Scope,
+        context: AggregateContext | None,
+        distinct: bool,
+    ) -> int:
+        """Where an ORDER BY key lives in the projected row, adding a hidden column if needed."""
+        if isinstance(expr, ast.Literal) and type(expr.value) is int:
+            if not 1 <= expr.value <= len(outputs):
+                raise UnknownColumnError(
+                    f"ORDER BY position {expr.value} is not in the select list"
+                )
+            return expr.value - 1
+        if isinstance(expr, ast.ColumnRef) and expr.table is None:
+            named = [i for i, (name, _) in enumerate(outputs) if name == expr.name]
+            if len(named) > 1:
+                raise AmbiguousColumnError(f'ORDER BY "{expr.name}" is ambiguous')
+            if named:
+                return named[0]
+        bound = self.bind_expr(expr, scope, context)
+        for i, (_, output) in enumerate(outputs):
+            if bound == output:
+                return i
+        if distinct:
+            raise GroupingError(
+                "for SELECT DISTINCT, ORDER BY expressions must appear in the select list"
+            )
+        hidden.append(bound)
+        return len(outputs) + len(hidden) - 1
 
     def bind_insert(self, insert: ast.Insert) -> BoundInsert:
         table = self._writable_table(insert.table)
@@ -187,45 +332,62 @@ class Binder:
 
     # ----------------------------------------------------------------- expressions
 
-    def bind_expr(self, expr: ast.Expr, scope: Scope) -> BoundExpr:
+    def bind_expr(
+        self, expr: ast.Expr, scope: Scope, aggregate: AggregateContext | None = None
+    ) -> BoundExpr:
+        """Bind ``expr``. Inside an aggregate query, ``aggregate`` maps grouped expressions and
+        aggregate calls onto the aggregate row, and any other column reference is an error."""
+        if aggregate is not None:
+            group = aggregate.match_group(expr)
+            if group is not None:
+                return group
+            if isinstance(expr, ast.FunctionCall) and expr.name in AGGREGATES:
+                return aggregate.add(self._bind_aggregate(expr, scope), _output_name(expr))
+            if isinstance(expr, ast.ColumnRef):
+                scope.resolve(expr)  # report unknown columns as such
+                raise GroupingError(
+                    f'column "{expr.to_sql()}" must appear in the GROUP BY clause '
+                    "or be used in an aggregate function"
+                )
+        a = aggregate
         match expr:
             case ast.Literal(value=literal):
                 return BoundLiteral(literal, _literal_type(literal))
             case ast.ColumnRef():
                 return scope.resolve(expr)
             case ast.UnaryOp(op="NOT", operand=operand):
-                inner = self.bind_expr(operand, scope)
+                inner = self.bind_expr(operand, scope, a)
                 _require(inner, {DataType.BOOL}, "NOT")
                 return BoundUnary("NOT", inner, DataType.BOOL)
             case ast.UnaryOp(op=op, operand=operand):
-                inner = self.bind_expr(operand, scope)
+                inner = self.bind_expr(operand, scope, a)
                 _require(inner, NUMERIC, f"unary {op}")
                 return BoundUnary(op, inner, inner.type)
             case ast.BinaryOp(op=op, left=left, right=right):
                 return self._bind_binary(
-                    op, self.bind_expr(left, scope), self.bind_expr(right, scope)
+                    op, self.bind_expr(left, scope, a), self.bind_expr(right, scope, a)
                 )
             case ast.IsNull(operand=operand, negated=negated):
-                return BoundIsNull(self.bind_expr(operand, scope), negated)
+                return BoundIsNull(self.bind_expr(operand, scope, a), negated)
             case ast.InList(operand=operand, items=items, negated=negated):
-                value = self.bind_expr(operand, scope)
-                bound_items = tuple(self.bind_expr(i, scope) for i in items)
+                value = self.bind_expr(operand, scope, a)
+                bound_items = tuple(self.bind_expr(i, scope, a) for i in items)
                 for item in bound_items:
                     _require_comparable(value, item, "IN")
                 return BoundInList(value, bound_items, negated)
             case ast.Between(operand=operand, low=low, high=high, negated=negated):
-                value = self.bind_expr(operand, scope)
-                lo, hi = self.bind_expr(low, scope), self.bind_expr(high, scope)
+                value = self.bind_expr(operand, scope, a)
+                lo, hi = self.bind_expr(low, scope, a), self.bind_expr(high, scope, a)
                 _require_comparable(value, lo, "BETWEEN")
                 _require_comparable(value, hi, "BETWEEN")
                 return BoundBetween(value, lo, hi, negated)
             case ast.Like(operand=operand, pattern=pattern, negated=negated):
-                value, pat = self.bind_expr(operand, scope), self.bind_expr(pattern, scope)
+                value, pat = self.bind_expr(operand, scope, a), self.bind_expr(pattern, scope, a)
                 _require(value, {DataType.TEXT}, "LIKE")
                 _require(pat, {DataType.TEXT}, "LIKE")
                 return BoundLike(value, pat, negated)
             case ast.FunctionCall():
-                return self._bind_function(expr, scope)
+                return self._bind_function(expr, scope, a)
         raise TypeError(f"cannot bind {expr!r}")
 
     def _bind_binary(self, op: str, left: BoundExpr, right: BoundExpr) -> BoundExpr:
@@ -250,13 +412,18 @@ class Binder:
             result = DataType.INT
         return BoundBinary(op, left, right, result)
 
-    def _bind_function(self, call: ast.FunctionCall, scope: Scope) -> BoundExpr:
+    def _bind_function(
+        self, call: ast.FunctionCall, scope: Scope, aggregate: AggregateContext | None
+    ) -> BoundExpr:
         name = call.name
         if name in AGGREGATES:
-            raise NotSupportedError(f"aggregate function {name} is not supported yet")
+            raise GroupingError(
+                f"aggregate function {name} is not allowed here (only in the select list, "
+                "HAVING and ORDER BY)"
+            )
         if name not in SCALAR_FUNCTIONS:
             raise UnknownFunctionError(f"function {name} does not exist")
-        args = tuple(self.bind_expr(a, scope) for a in call.args)
+        args = tuple(self.bind_expr(a, scope, aggregate) for a in call.args)
         if name == "COALESCE":
             if not args:
                 raise TypeMismatchError("COALESCE needs at least one argument")
@@ -276,6 +443,23 @@ class Binder:
             return BoundFunction(name, args, DataType.INT)
         _require(arg, NUMERIC, name)  # ABS
         return BoundFunction(name, args, arg.type)
+
+    def _bind_aggregate(self, call: ast.FunctionCall, scope: Scope) -> BoundAggregate:
+        name = call.name
+        if call.star:
+            return BoundAggregate("COUNT", None, DataType.INT)
+        if len(call.args) != 1:
+            raise TypeMismatchError(f"{name} takes exactly one argument, got {len(call.args)}")
+        if _contains_aggregate(call.args[0]):
+            raise GroupingError("aggregate function calls cannot be nested")
+        arg = self.bind_expr(call.args[0], scope)
+        if name == "COUNT":
+            return BoundAggregate(name, arg, DataType.INT)
+        if name in ("SUM", "AVG"):
+            _require(arg, NUMERIC, name)
+            result = DataType.FLOAT if name == "AVG" else (arg.type or DataType.INT)
+            return BoundAggregate(name, arg, result)
+        return BoundAggregate(name, arg, arg.type)  # MIN, MAX
 
     # ----------------------------------------------------------------- helpers
 
@@ -312,6 +496,29 @@ class Binder:
                 f"(columns: {', '.join(table.column_names())})"
             )
         return position
+
+
+def _ast_children(expr: ast.Expr) -> tuple[ast.Expr, ...]:
+    match expr:
+        case ast.UnaryOp(operand=operand) | ast.IsNull(operand=operand):
+            return (operand,)
+        case ast.BinaryOp(left=left, right=right):
+            return (left, right)
+        case ast.InList(operand=operand, items=items):
+            return (operand, *items)
+        case ast.Between(operand=operand, low=low, high=high):
+            return (operand, low, high)
+        case ast.Like(operand=operand, pattern=pattern):
+            return (operand, pattern)
+        case ast.FunctionCall(args=args):
+            return args
+    return ()
+
+
+def _contains_aggregate(expr: ast.Expr) -> bool:
+    if isinstance(expr, ast.FunctionCall) and expr.name in AGGREGATES:
+        return True
+    return any(_contains_aggregate(child) for child in _ast_children(expr))
 
 
 def _literal_type(value: object) -> DataType | None:

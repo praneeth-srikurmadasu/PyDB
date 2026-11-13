@@ -89,3 +89,7 @@ class UniqueViolationError(ConstraintViolationError):
 
 class DivisionByZeroError(PyDBError):
     pass
+
+
+class GroupingError(PyDBError):
+    """A query mixes aggregated and non-aggregated columns incorrectly."""

@@ -93,6 +93,12 @@ class DiskManager:
         file.flush()
         os.fsync(file.fileno())
 
+    def abandon(self) -> None:
+        """Close without syncing, as a crash would. Used to test recovery."""
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
     def close(self) -> None:
         """Sync and close the file. Calling it again does nothing."""
         if self._file is None:
@@ -152,10 +158,19 @@ class DiskManager:
 
     # ----------------------------------------------------------------- allocation
 
-    def allocate_page(self) -> int:
-        """Return the id of a fresh EMPTY page, reusing a freed page when one exists."""
+    def allocate_page(self, lsn: int = 0) -> int:
+        """Return the id of a fresh EMPTY page, reusing a freed page when one exists.
+
+        The new page's ``page_lsn`` is set to ``lsn`` so that log records about the page's
+        previous life (before it was freed) are never replayed onto it.
+
+        A reused page is unlinked from the free list (header page written) *before* it is
+        overwritten, so a crash between the two writes leaks one unreferenced page instead
+        of leaving the free list pointing at a page that is no longer free.
+        """
         head = self._header.free_list_head
-        if head != INVALID_PAGE_ID:
+        fresh_from_free_list = head != INVALID_PAGE_ID
+        if fresh_from_free_list:
             freed = self.read_page(head)
             if page.read_header(freed).page_type is not PageType.FREE:
                 raise CorruptPageError(f"free list head {head} is not a FREE page")
@@ -163,20 +178,31 @@ class DiskManager:
             page_id = head
             self._header.free_list_head = next_free
             self._header.free_page_count -= 1
+            self._write_header_page()
         else:
             page_id = self._header.next_page_id
             self._header.next_page_id += 1
-        self._write_raw(page_id, page.new_page(page_id, PageType.EMPTY))
-        self._write_header_page()
+        fresh = page.new_page(page_id, PageType.EMPTY)
+        page.write_header(fresh, page.PageHeader(page_id, PageType.EMPTY, lsn))
+        self._write_raw(page_id, fresh)
+        if not fresh_from_free_list:
+            self._write_header_page()  # the page exists in the file before the header counts it
         return page_id
 
-    def deallocate_page(self, page_id: int) -> None:
-        """Put a page on the free list. Freeing a page twice raises StorageError."""
+    def deallocate_page(self, page_id: int, lsn: int = 0, *, known_live: bool = False) -> None:
+        """Put a page on the free list. Freeing a page twice raises StorageError.
+
+        The freed page is stamped with ``lsn`` for the same reason as in ``allocate_page``.
+        ``known_live`` skips the double-free check, which reads the page from disk; the buffer
+        pool sets it when it held the page, whose on-disk copy may be stale or torn.
+        """
         self._check_data_page_id(page_id)
-        current = self.read_page(page_id)
-        if page.read_header(current).page_type is PageType.FREE:
-            raise StorageError(f"page {page_id} is already free")
+        if not known_live:
+            current = self.read_page(page_id)
+            if page.read_header(current).page_type is PageType.FREE:
+                raise StorageError(f"page {page_id} is already free")
         buf = page.new_page(page_id, PageType.FREE)
+        page.write_header(buf, page.PageHeader(page_id, PageType.FREE, lsn))
         _FREE_NEXT.pack_into(buf, page.HEADER_SIZE, self._header.free_list_head)
         self._write_raw(page_id, buf)
         self._header.free_list_head = page_id

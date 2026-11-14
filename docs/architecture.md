@@ -14,10 +14,13 @@ Operator tree (Volcano)                   pydb/execution/
   ▼
 TableHeap (slotted pages)  +  B+ trees    pydb/storage/, pydb/index/
   ▼
-Buffer pool (LRU) → DiskManager → one database file
+Buffer pool (LRU) → DiskManager → database file
+  │ every page change is logged
+  ▼
+Transactions, write-ahead log, recovery   pydb/txn/  → <database>.wal
 ```
 
-Each layer only calls the one below it. Everything is in one process and one file.
+Each layer only calls the one below it. A database is one data file plus one log file.
 
 ## The life of a query
 
@@ -68,9 +71,8 @@ memory (`pydb/catalog/catalog.py`). Defaults are stored as SQL literals and pars
 System tables can be read with `SELECT` but not written. User table names may not start
 with `__`.
 
-## Durability (current state)
+## Durability
 
-Changes are made in buffer-pool pages and written to the file when pages are evicted and
-when the database is closed. There is no write-ahead log yet, so a process that stops
-without closing the database can lose recent changes or leave the file inconsistent. A
-statement that fails part-way is undone by the statement undo log in `TableWriter`.
+Every statement runs in a transaction. Page changes are logged by the buffer pool, completed
+row operations by the table writer, and a commit returns once its log record is on disk.
+Opening a database replays and rolls back from the log as needed. See transactions.md.

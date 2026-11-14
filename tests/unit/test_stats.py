@@ -69,8 +69,11 @@ def test_database_without_stats_table_is_upgraded(tmp_path: Path) -> None:
         # Make the file look like one written before __stats__ existed.
         catalog = db.catalog
         stats_id = catalog.get_table(STATS_TABLE).table_id
-        catalog._delete_system_rows("__columns__", lambda r: r[0] == stats_id)
-        catalog._delete_system_rows("__tables__", lambda r: r[0] == stats_id)
+        txn = db.tm.begin(physical=True)
+        with db.tm.activate(txn):
+            catalog._delete_system_rows("__columns__", lambda r: r[0] == stats_id)
+            catalog._delete_system_rows("__tables__", lambda r: r[0] == stats_id)
+        db.tm.commit(txn)
     with Database(path) as db:
         assert db.catalog.has_table(STATS_TABLE)
         db.execute("ANALYZE t")

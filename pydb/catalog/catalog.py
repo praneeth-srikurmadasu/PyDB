@@ -78,13 +78,44 @@ _SYSTEM_SCHEMAS: dict[str, tuple[int, tuple[Column, ...]]] = {
 
 
 class Catalog:
-    def __init__(self, pool: BufferPoolManager) -> None:
+    """The in-memory catalog, loaded from (or, for a new file, written to) system tables.
+
+    Without a write-ahead log, a new catalog's root is recorded in the header page at once.
+    With one, the caller records it with ``record_root()`` after the creating transaction
+    commits, so a crash during creation never leaves the header pointing at undone pages.
+    ``migrate`` adds system tables missing from files made by older versions.
+    """
+
+    def __init__(self, pool: BufferPoolManager, *, migrate: bool = True) -> None:
         self.pool = pool
         self._tables: dict[str, TableInfo] = {}
         if pool.disk.catalog_root == INVALID_PAGE_ID:
             self._bootstrap()
         else:
-            self._load(pool.disk.catalog_root)
+            self._load(pool.disk.catalog_root, migrate)
+
+    @property
+    def root_page(self) -> int:
+        return self._tables[TABLES_TABLE].heap.first_page_id
+
+    def record_root(self) -> None:
+        """Point the header page at this catalog (all its pages must already be durable)."""
+        self.pool.flush_all()
+        self.pool.disk.set_catalog_root(self.root_page)
+        self.pool.disk.sync()
+
+    def needs_migration(self) -> bool:
+        return STATS_TABLE not in self._tables
+
+    def migrate(self) -> None:
+        if STATS_TABLE not in self._tables:
+            self._add_system_table(STATS_TABLE)
+
+    def table_by_id(self, table_id: int) -> TableInfo:
+        for table in self._tables.values():
+            if table.table_id == table_id:
+                return table
+        raise UnknownTableError(f"no table has id {table_id}")
 
     # ----------------------------------------------------------------- lookups
 
@@ -260,9 +291,8 @@ class Catalog:
             self._insert_system_row(TABLES_TABLE, (table_id, name, first_page))
             for position, column in enumerate(columns):
                 self._insert_system_row(COLUMNS_TABLE, _column_row(table_id, position, column))
-        self.pool.flush_all()  # the pages must be on disk before the header points at them
-        self.pool.disk.set_catalog_root(self._tables[TABLES_TABLE].heap.first_page_id)
-        self.pool.disk.sync()
+        if self.pool.logger is None:
+            self.record_root()
 
     def _add_system_table(self, name: str) -> None:
         """Create a system table missing from a database made by an older version."""
@@ -294,7 +324,7 @@ class Catalog:
                 ordered = tuple(per_column[i] for i in range(len(table.columns)))
                 table.stats = TableStats(rows, pages, ordered)
 
-    def _load(self, root: int) -> None:
+    def _load(self, root: int, migrate: bool) -> None:
         tables_schema = _SYSTEM_SCHEMAS[TABLES_TABLE][1]
         bootstrap = TableInfo(1, TABLES_TABLE, tables_schema, TableHeap(self.pool, root))
         table_rows = [bootstrap.layout.deserialize(d) for _, d in bootstrap.heap.scan()]
@@ -316,10 +346,11 @@ class Catalog:
             columns = tuple(c for _, c in sorted(by_table.get(table_id, [])))
             self._tables[name] = TableInfo(table_id, name, columns, heaps[name])
 
-        if STATS_TABLE not in self._tables:
-            self._add_system_table(STATS_TABLE)
+        if migrate:
+            self.migrate()
         by_id = {t.table_id: t for t in self._tables.values()}
-        self._load_stats(by_id)
+        if STATS_TABLE in self._tables:
+            self._load_stats(by_id)
         indexes_table = self._tables[INDEXES_TABLE]
         for _, data in indexes_table.heap.scan():
             r = indexes_table.layout.deserialize(data)

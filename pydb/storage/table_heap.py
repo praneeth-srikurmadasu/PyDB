@@ -72,9 +72,20 @@ class TableHeap:
         self.delete(rid)
         return new_rid
 
-    def delete(self, rid: RID) -> None:
+    def delete(self, rid: RID, *, reserve: bool = False) -> None:
+        """Delete a row. With ``reserve`` its space is kept so ``restore`` can undo it."""
         with self.pool.page(rid.page_id, write=True) as frame:
-            SlottedPage(frame.data).delete_tuple(rid.slot_id)
+            SlottedPage(frame.data).delete_tuple(rid.slot_id, reserve=reserve)
+
+    def restore(self, rid: RID) -> None:
+        """Bring back a row deleted with ``reserve=True``, at the same RID."""
+        with self.pool.page(rid.page_id, write=True) as frame:
+            SlottedPage(frame.data).restore_tuple(rid.slot_id)
+
+    def purge(self, rid: RID) -> None:
+        """Free the space of a row deleted with ``reserve=True``."""
+        with self.pool.page(rid.page_id, write=True) as frame:
+            SlottedPage(frame.data).purge_tuple(rid.slot_id)
 
     def scan(self) -> Iterator[tuple[RID, bytes]]:
         """Yield every live row, page by page in chain order, slot by slot.

@@ -25,6 +25,7 @@ from pydb.sql.tokens import TokenType
 from pydb.types import Value
 
 PROMPT = "pydb> "
+PROMPT_IN_TRANSACTION = "pydb*> "
 CONTINUATION = "  ...> "
 HELP = """\
 .tables              list tables
@@ -90,7 +91,8 @@ class Repl:
         buffer = ""
         while True:
             if self.interactive:
-                self.stdout.write(CONTINUATION if buffer else PROMPT)
+                prompt = PROMPT_IN_TRANSACTION if self.db.in_transaction else PROMPT
+                self.stdout.write(CONTINUATION if buffer else prompt)
                 self.stdout.flush()
             try:
                 line = self.stdin.readline()
@@ -122,7 +124,7 @@ class Repl:
         for statement in statements:
             started = time.perf_counter()
             try:
-                result = self.db.executor.execute(statement)
+                result = self.db.execute_statement(statement)
             except PyDBError as exc:
                 self._print(f"Error: {exc}")
                 return

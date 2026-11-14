@@ -103,9 +103,10 @@ class Sort(Operator):
         self._runs = []
 
     def _spill(self, rows: list[Row]) -> None:
-        run = TableHeap.create(self.pool)
-        for row in rows:
-            run.insert(self.layout.serialize(row))
+        with self.pool.unlogged():  # runs are temporary: never logged, freed at close
+            run = TableHeap.create(self.pool)
+            for row in rows:
+                run.insert(self.layout.serialize(row))
         self._runs.append(run)
         self.runs_written += 1
 

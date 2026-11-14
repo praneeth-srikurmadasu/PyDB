@@ -13,7 +13,7 @@ from pydb.errors import (
     DivisionByZeroError,
     DuplicateObjectError,
     NotNullViolationError,
-    NotSupportedError,
+    TransactionError,
     TypeMismatchError,
     UniqueViolationError,
     ValueTooLargeError,
@@ -179,13 +179,15 @@ def test_ddl_statements(db: Database) -> None:
     assert rows(db, "SHOW TABLES") == [("users",)]
 
 
-@pytest.mark.parametrize(
-    "sql",
-    ["BEGIN", "COMMIT", "ROLLBACK"],
-)
-def test_unsupported_statements_say_so(db: Database, sql: str) -> None:
-    with pytest.raises(NotSupportedError):
-        db.execute(sql)
+def test_transaction_commands_need_a_transaction(db: Database) -> None:
+    with pytest.raises(TransactionError, match="without BEGIN"):
+        db.execute("COMMIT")
+    with pytest.raises(TransactionError, match="without BEGIN"):
+        db.execute("ROLLBACK")
+    db.execute("BEGIN")
+    with pytest.raises(TransactionError, match="already in progress"):
+        db.execute("BEGIN")
+    db.execute("ROLLBACK")
 
 
 def test_everything_persists(tmp_path: Path) -> None:

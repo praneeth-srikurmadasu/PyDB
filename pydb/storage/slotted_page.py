@@ -11,7 +11,10 @@ Layout after the 24-byte common page header::
     ...           free space
     free_ptr      tuple data, growing backward from the end of the page
 
-A slot with offset 0 is a tombstone: the tuple was deleted. Slot ids are never reused, and
+A slot with offset 0 is a tombstone: the tuple was deleted and its space is free. A slot
+whose length has the high bit (``RESERVED``) set is a *reserved* delete: the row is gone, but
+its bytes stay in place so an uncommitted delete can be undone by ``restore_tuple``;
+``purge_tuple`` (at commit) turns it into a tombstone. Slot ids are never reused, and
 ``compact()`` moves tuple bytes without changing slot ids, so a RID stays valid for the life
 of its row.
 """
@@ -33,6 +36,8 @@ MAX_TUPLE_SIZE = PAGE_SIZE - SLOT_ARRAY_OFFSET - SLOT_SIZE
 """Largest tuple that fits on an empty page together with its slot."""
 
 _TOMBSTONE = 0
+RESERVED = 0x8000
+_LENGTH_MASK = 0x7FFF
 
 
 def format_page(page_id: int, prev_page_id: int = INVALID_PAGE_ID) -> bytearray:
@@ -93,8 +98,8 @@ class SlottedPage:
 
     def reclaimable_space(self) -> int:
         """Bytes that would be free after ``compact()``."""
-        live = sum(length for offset, length in self._slots() if offset != _TOMBSTONE)
-        return PAGE_SIZE - self._slot_array_end() - live
+        used = sum(raw & _LENGTH_MASK for offset, raw in self._slots() if offset != _TOMBSTONE)
+        return PAGE_SIZE - self._slot_array_end() - used
 
     # ----------------------------------------------------------------- tuple operations
 
@@ -136,32 +141,55 @@ class SlottedPage:
         self._set_header(free_ptr=new_offset)
         return True
 
-    def delete_tuple(self, slot_id: int) -> None:
-        self._live_slot(slot_id)
+    def delete_tuple(self, slot_id: int, *, reserve: bool = False) -> None:
+        """Delete a tuple. With ``reserve`` its bytes are kept for ``restore_tuple``."""
+        offset, length = self._live_slot(slot_id)
+        if reserve:
+            self._set_slot(slot_id, offset, length | RESERVED)
+        else:
+            self._set_slot(slot_id, _TOMBSTONE, 0)
+
+    def restore_tuple(self, slot_id: int) -> None:
+        """Undo a reserved delete."""
+        offset, raw = self._reserved_slot(slot_id)
+        self._set_slot(slot_id, offset, raw & _LENGTH_MASK)
+
+    def purge_tuple(self, slot_id: int) -> None:
+        """Free the space of a reserved delete."""
+        self._reserved_slot(slot_id)
         self._set_slot(slot_id, _TOMBSTONE, 0)
 
     def is_live(self, slot_id: int) -> bool:
-        return 0 <= slot_id < self.slot_count and self._slot(slot_id)[0] != _TOMBSTONE
+        if not 0 <= slot_id < self.slot_count:
+            return False
+        offset, raw = self._slot(slot_id)
+        return offset != _TOMBSTONE and not raw & RESERVED
+
+    def is_reserved(self, slot_id: int) -> bool:
+        if not 0 <= slot_id < self.slot_count:
+            return False
+        offset, raw = self._slot(slot_id)
+        return offset != _TOMBSTONE and bool(raw & RESERVED)
 
     def live_slots(self) -> Iterator[int]:
-        for slot_id, (offset, _) in enumerate(self._slots()):
-            if offset != _TOMBSTONE:
+        for slot_id, (offset, raw) in enumerate(self._slots()):
+            if offset != _TOMBSTONE and not raw & RESERVED:
                 yield slot_id
 
     def compact(self) -> None:
-        """Pack live tuples against the end of the page. Slot ids do not change."""
-        live = [
-            (slot_id, bytes(self.buf[offset : offset + length]))
-            for slot_id, (offset, length) in enumerate(self._slots())
+        """Pack live and reserved tuples against the end of the page. Slot ids do not change."""
+        kept = [
+            (slot_id, raw, bytes(self.buf[offset : offset + (raw & _LENGTH_MASK)]))
+            for slot_id, (offset, raw) in enumerate(self._slots())
             if offset != _TOMBSTONE
         ]
         end = self._slot_array_end()
         self.buf[end:PAGE_SIZE] = bytes(PAGE_SIZE - end)
         free_ptr = PAGE_SIZE
-        for slot_id, data in live:
+        for slot_id, raw, data in kept:
             free_ptr -= len(data)
             self.buf[free_ptr : free_ptr + len(data)] = data
-            self._set_slot(slot_id, free_ptr, len(data))
+            self._set_slot(slot_id, free_ptr, raw)
         self._set_header(free_ptr=free_ptr)
 
     # ----------------------------------------------------------------- internals
@@ -187,9 +215,16 @@ class SlottedPage:
         if not 0 <= slot_id < self.slot_count:
             raise RecordNotFoundError(f"page {self.page_id} has no slot {slot_id}")
         offset, length = self._slot(slot_id)
-        if offset == _TOMBSTONE:
+        if offset == _TOMBSTONE or length & RESERVED:
             raise RecordNotFoundError(f"slot {slot_id} on page {self.page_id} is deleted")
         return offset, length
+
+    def _reserved_slot(self, slot_id: int) -> tuple[int, int]:
+        if not self.is_reserved(slot_id):
+            raise RecordNotFoundError(
+                f"slot {slot_id} on page {self.page_id} is not a reserved delete"
+            )
+        return self._slot(slot_id)
 
     def _set_header(
         self,

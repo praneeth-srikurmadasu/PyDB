@@ -52,9 +52,11 @@ the page is rewritten as a zeroed `EMPTY` page. `deallocate_page()` pushes; free
 that is already `FREE` raises `StorageError`. Both operations are O(1) and need no extra
 space.
 
-**Limit:** an allocation or free writes two pages (the page and the header page) without a
-log, so a crash between the two writes can leak a page. The write-ahead log will make these
-changes atomic.
+Allocation and freeing bypass the write-ahead log. A page taken from the free list is
+unlinked in the header before it is overwritten, so a crash between the two writes can leak
+a page but never leave the free list pointing at a page in use. Both operations stamp the
+page with an LSN supplied by the caller, so redo never replays records about the page's
+previous use (see transactions.md).
 
 ## Types
 
@@ -102,10 +104,13 @@ Example, schema `(INT, TEXT, BOOL)`, row `(7, 'hi', NULL)`, 16 bytes:
 The slot array grows forward and tuples grow backward from the end of the page. The largest
 tuple is `4096 - 36 - 4 = 4056` bytes; anything larger raises `RowTooLargeError`.
 
-- **Delete** sets the slot's offset to 0 (a tombstone).
+- **Delete** sets the slot's offset to 0 (a tombstone), or, for a delete that may be rolled
+  back, sets the high bit of its length (a *reserved* delete): the bytes stay so
+  `restore_tuple` can bring the row back, and `purge_tuple` frees them at commit.
 - **Update** overwrites in place when the new tuple is not longer; otherwise it moves the
   tuple within the page if the page has room after compaction, and reports failure if not.
-- **Compact** packs live tuples against the end of the page. Slot ids do not change.
+- **Compact** packs live and reserved tuples against the end of the page. Slot ids do not
+  change.
 - **Slot ids are never reused**, so a RID always means the same row. A deleted row's RID
   must stay unclaimed until its delete can no longer be rolled back. The cost is 4 bytes
   per dead slot.
@@ -125,7 +130,7 @@ doubly linked list of slotted pages starting at
 **Limits:** the hint only moves forward, so space freed on pages before the hint is reused
 only after the table is reopened. Empty pages stay in the chain. Pages reach the disk in
 whatever order the buffer pool evicts or flushes them, so a crash can leave the chain
-inconsistent until the write-ahead log makes multi-page changes atomic.
+inconsistent; the write-ahead log repairs that on recovery.
 
 ## Buffer pool
 
@@ -151,9 +156,12 @@ replacer:    LRU order over frames with pin_count == 0   (pydb/storage/replacer.
   page and returns it to the disk free list.
 - **Write-ahead rule:** before writing a dirty page, the pool calls
   `log_flusher(page_lsn)`. If the call raises, the page stays dirty and resident.
+- **Logging:** with a `logger` attached (the transaction manager), leaving a write-latched
+  `page()` or `create_page()` block logs the bytes that changed and stamps the page's
+  `page_lsn`. Pages created inside `unlogged()` (sort runs) are never logged and are freed
+  immediately. `delete_page` may defer a free until it is safe (see transactions.md).
 - **Policy:** steal (a dirty page of unfinished work may be evicted) and no-force (nothing is
-  written at commit). Changes not yet flushed are lost if the process stops without
-  `flush_all()`; the write-ahead log will make that safe.
+  written at commit). The write-ahead log makes both safe.
 
 **Statistics:** `stats` returns hits, misses, evictions, writes and `hit_rate`;
 `pinned_pages()` reports pin counts, and is empty when no pins have leaked.

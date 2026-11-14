@@ -22,3 +22,6 @@ MAX_KEY_TEXT_BYTES: Final[int] = 64
 
 SORT_MEMORY_BYTES: Final[int] = 2 * 1024 * 1024
 """Rows a sort may hold in memory (by serialized size) before spilling sorted runs to disk."""
+
+CHECKPOINT_INTERVAL_RECORDS: Final[int] = 5000
+"""A checkpoint is taken after a commit once this many log records were written since the last."""

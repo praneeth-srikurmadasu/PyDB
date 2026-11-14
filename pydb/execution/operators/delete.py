@@ -2,14 +2,15 @@
 
 from pydb.catalog.schema import TableInfo
 from pydb.execution.operators.base import Operator, RidSource
-from pydb.execution.table_writer import TableWriter
+from pydb.execution.table_writer import Journal, TableWriter
 from pydb.storage.tuple import Row
 
 
 class Delete(Operator):
     columns = ("count",)
 
-    def __init__(self, table: TableInfo, source: RidSource) -> None:
+    def __init__(self, table: TableInfo, source: RidSource, journal: Journal | None = None) -> None:
+        self.journal = journal
         self.table = table
         self.source = source
         self._done = False
@@ -34,11 +35,7 @@ class Delete(Operator):
                 targets.append(item)
         finally:
             self.source.close()
-        writer = TableWriter(self.table)
-        try:
-            for rid, row in targets:
-                writer.delete(rid, row)
-        except BaseException:
-            writer.rollback()
-            raise
+        writer = TableWriter(self.table, self.journal)
+        for rid, row in targets:
+            writer.delete(rid, row)
         return (len(targets),)

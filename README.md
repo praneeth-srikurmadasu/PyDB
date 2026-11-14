@@ -20,6 +20,10 @@ pydb> SELECT u.name, COUNT(*) AS n, SUM(o.total) FROM users u
   ...> JOIN orders o ON o.user_id = u.id GROUP BY u.name ORDER BY n DESC;
 ```
 
+Transactions: `BEGIN; ... COMMIT;` or `ROLLBACK;` (the prompt shows `pydb*>` inside one).
+Each database is a file plus a write-ahead log, `demo.db.wal`, which is emptied on a clean
+exit.
+
 Meta commands: `.tables`, `.schema [table]`, `.timer on|off`, `.help`, `.quit`.
 
 ## Development setup (Windows PowerShell)

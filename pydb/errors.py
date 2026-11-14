@@ -93,3 +93,11 @@ class DivisionByZeroError(PyDBError):
 
 class GroupingError(PyDBError):
     """A query mixes aggregated and non-aggregated columns incorrectly."""
+
+
+class TransactionError(PyDBError):
+    """Misuse of transactions, such as COMMIT without BEGIN or DDL inside a transaction."""
+
+
+class LogCorruptError(PyDBError):
+    """The write-ahead log is unreadable before its valid end."""

@@ -11,6 +11,7 @@ from pydb.execution.operators.base import Operator
 from pydb.execution.operators.delete import Delete
 from pydb.execution.operators.insert import Insert
 from pydb.execution.operators.update import Update
+from pydb.execution.table_writer import Journal
 from pydb.planner.binder import Binder
 from pydb.planner.explain import explain_lines, instrument
 from pydb.planner.optimizer import Optimizer
@@ -32,8 +33,14 @@ class Result:
 
 
 class Executor:
-    def __init__(self, catalog: Catalog, settings: PlannerSettings | None = None) -> None:
+    def __init__(
+        self,
+        catalog: Catalog,
+        settings: PlannerSettings | None = None,
+        journal: Journal | None = None,
+    ) -> None:
         self.catalog = catalog
+        self.journal = journal
         self.binder = Binder(catalog)
         self.settings = settings or PlannerSettings()
         self.optimizer = Optimizer(catalog.pool, self.settings)
@@ -50,16 +57,21 @@ class Executor:
                     self._insert_values(bound.table.columns, bound.positions, row)
                     for row in bound.rows
                 ]
-                return self._run_write(Insert(bound.table, values), "INSERT")
+                return self._run_write(Insert(bound.table, values, self.journal), "INSERT")
             case ast.Update():
                 upd = self.binder.bind_update(statement)
                 source = self.optimizer.access_path(upd.table, upd.where)
                 assignments = [(p, compile_expr(e)) for p, e in upd.assignments]
-                return self._run_write(Update(upd.table, source, assignments), "UPDATE")
+                return self._run_write(
+                    Update(upd.table, source, assignments, self.journal), "UPDATE"
+                )
             case ast.Delete():
                 dele = self.binder.bind_delete(statement)
                 return self._run_write(
-                    Delete(dele.table, self.optimizer.access_path(dele.table, dele.where)), "DELETE"
+                    Delete(
+                        dele.table, self.optimizer.access_path(dele.table, dele.where), self.journal
+                    ),
+                    "DELETE",
                 )
             case ast.CreateTable():
                 return self._create_table(statement)
@@ -93,7 +105,7 @@ class Executor:
                 return Result(message="ANALYZE")
             case ast.Begin() | ast.Commit() | ast.Rollback():
                 raise NotSupportedError(
-                    "explicit transactions are not supported yet; each statement commits on its own"
+                    "transaction statements are handled by the Database session"
                 )
         raise NotSupportedError(f"{type(statement).__name__} is not supported")
 

@@ -14,11 +14,12 @@ Logging (see ``wal.py`` for the record formats):
 
 **Undo.** Walking a transaction's records backwards, PAGE_DIFF records newer than its last
 completed row operation belong to an operation interrupted half-way; they are undone
-physically, by writing back their before-images. (Operations run one at a time, so such
-records are the newest in the log and no other transaction has touched those bytes since.)
-Older PAGE_DIFF records are covered by the logical record of their operation and skipped. A
-*physical* transaction (DDL) is undone entirely by before-images; DDL never runs alongside
-other transactions.
+physically, by writing back their before-images. (Statements run one at a time under the
+engine latch, so such records are the newest in the log and no other transaction has
+touched those bytes since.) Older PAGE_DIFF records are covered by the logical record of
+their operation and skipped. A *physical* transaction (DDL) is undone entirely by
+before-images; a DDL transaction is a single statement, so it starts and ends under one
+hold of the latch and nothing else changes a page between its records.
 """
 
 import threading

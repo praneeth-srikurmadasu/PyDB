@@ -86,7 +86,7 @@ def test_line_and_column_are_tracked() -> None:
         ("SELECT 'abc", "unterminated string", 1, 8),
         ('SELECT "abc', "unterminated identifier", 1, 8),
         ("SELECT /* never closed", "unterminated /* comment", 1, 8),
-        ("SELECT a\n  FROM t WHERE x ? 1", "unexpected character '?'", 2, 18),
+        ("SELECT a\n  FROM t WHERE x $ 1", "unexpected character '$'", 2, 18),
         ("SELECT 12abc", "invalid number", 1, 8),
         ('SELECT ""', "empty quoted identifier", 1, 8),
     ],

@@ -25,3 +25,12 @@ SORT_MEMORY_BYTES: Final[int] = 2 * 1024 * 1024
 
 CHECKPOINT_INTERVAL_RECORDS: Final[int] = 5000
 """A checkpoint is taken after a commit once this many log records were written since the last."""
+
+LOCK_TIMEOUT_SECONDS: Final[float] = 30.0
+"""How long a transaction waits for a table lock before it is rolled back.
+
+Deadlocks are detected immediately; the timeout guards against waiting on a client that
+holds locks and never finishes its transaction."""
+
+DEFAULT_PORT: Final[int] = 5433
+"""TCP port the PyDB server listens on by default."""

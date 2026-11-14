@@ -12,10 +12,10 @@ A unary minus written directly before a numeric literal is folded into the liter
 ``-9223372036854775808`` is one INT literal rather than the negation of an out-of-range one.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import NoReturn, TypeVar
 
-from pydb.errors import SqlSyntaxError
+from pydb.errors import ParameterError, SqlSyntaxError
 from pydb.sql import ast
 from pydb.sql.lexer import tokenize
 from pydb.sql.tokens import Token, TokenType
@@ -48,12 +48,17 @@ _TYPE_NAMES = {
 }
 
 
-def parse(sql: str) -> ast.Statement:
-    """Parse exactly one statement, optionally followed by a semicolon."""
-    parser = _Parser(tokenize(sql))
+def parse(sql: str, params: Sequence[object] | None = None) -> ast.Statement:
+    """Parse exactly one statement, optionally followed by a semicolon.
+
+    Each ``?`` in the statement takes the next value of ``params`` and becomes a literal in
+    the tree, so values are never spliced into SQL text and cannot change its meaning.
+    """
+    parser = _Parser(tokenize(sql), params)
     statement = parser.statement()
     parser.accept(TokenType.SEMICOLON)
     parser.expect_end()
+    parser.check_all_params_used()
     return statement
 
 
@@ -79,9 +84,37 @@ def parse_expression(sql: str) -> ast.Expr:
 
 
 class _Parser:
-    def __init__(self, tokens: list[Token]) -> None:
+    def __init__(self, tokens: list[Token], params: Sequence[object] | None = None) -> None:
         self.tokens = tokens
         self.pos = 0
+        self.params = params
+        self.params_used = 0
+
+    def parameter(self) -> ast.LiteralValue:
+        """Consume a ``?`` token and return the parameter value it stands for."""
+        self.advance()
+        if self.params is None:
+            raise ParameterError("the statement has a '?' placeholder but no parameters were given")
+        if self.params_used >= len(self.params):
+            raise ParameterError(
+                f"the statement has more '?' placeholders than the {len(self.params)} "
+                "parameter(s) given"
+            )
+        value = self.params[self.params_used]
+        self.params_used += 1
+        if value is not None and not isinstance(value, int | float | str | bool):
+            raise ParameterError(
+                f"parameter {self.params_used} has unsupported type {type(value).__name__}; "
+                "use int, float, str, bool or None"
+            )
+        return value
+
+    def check_all_params_used(self) -> None:
+        if self.params is not None and self.params_used != len(self.params):
+            raise ParameterError(
+                f"{len(self.params)} parameter(s) given but the statement has "
+                f"{self.params_used} '?' placeholder(s)"
+            )
 
     # ----------------------------------------------------------------- token helpers
 
@@ -306,6 +339,11 @@ class _Parser:
         return ast.OrderItem(expr)
 
     def non_negative_integer(self, what: str) -> int:
+        if self.current.type is TokenType.PARAM:
+            value = self.parameter()
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ParameterError(f"{what} must be a non-negative integer, got {value!r}")
+            return value
         token = self.expect(TokenType.INTEGER, what)
         assert isinstance(token.value, int)
         return token.value
@@ -515,6 +553,8 @@ class _Parser:
 
     def prefix(self) -> ast.Expr:
         token = self.current
+        if token.type is TokenType.PARAM:
+            return ast.Literal(self.parameter())
         if token.type is TokenType.INTEGER or token.type is TokenType.FLOAT:
             self.advance()
             assert isinstance(token.value, int | float)

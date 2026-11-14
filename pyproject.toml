@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pydb"
-version = "0.1.0"
+version = "1.0.0"
 description = "A disk-based relational database engine in pure Python"
 readme = "README.md"
 license = "MIT"
@@ -37,7 +37,7 @@ select = ["E", "F", "W", "I", "B", "UP", "N", "SIM", "RUF"]
 [tool.mypy]
 strict = true
 python_version = "3.12"
-files = ["pydb", "tests"]
+files = ["pydb", "tests", "benchmarks"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

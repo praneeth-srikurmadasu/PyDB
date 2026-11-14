@@ -17,6 +17,7 @@ class TokenType(Enum):
     DOT = auto()
     SEMICOLON = auto()
     STAR = auto()
+    PARAM = auto()  # '?', a placeholder for a parameter value
     EOF = auto()
 
 

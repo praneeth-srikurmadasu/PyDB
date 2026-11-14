@@ -3,6 +3,7 @@
 Usage::
 
     python -m pydb.cli.repl data.db
+    python -m pydb.cli.repl --connect 127.0.0.1:5433
 
 Statements may span several lines and run when a line ends the statement with ``;``.
 Meta commands start with a dot: ``.tables``, ``.schema [table]``, ``.timer on|off``,
@@ -13,8 +14,10 @@ import argparse
 import sys
 import time
 from collections.abc import Sequence
-from typing import TextIO
+from typing import Protocol, TextIO
 
+from pydb.client import Client
+from pydb.config import DEFAULT_PORT
 from pydb.database import Database
 from pydb.errors import PyDBError, SqlSyntaxError
 from pydb.execution.executor import Result
@@ -77,8 +80,31 @@ def is_blank(text: str) -> bool:
         return False
 
 
+class Backend(Protocol):
+    """Where the shell sends statements: an open database or a server connection."""
+
+    @property
+    def in_transaction(self) -> bool: ...
+
+    def execute_statement(self, statement: ast.Statement) -> Result: ...
+
+
+class RemoteBackend:
+    """Sends each statement to a PyDB server as SQL text."""
+
+    def __init__(self, client: Client) -> None:
+        self.client = client
+
+    @property
+    def in_transaction(self) -> bool:
+        return self.client.in_transaction
+
+    def execute_statement(self, statement: ast.Statement) -> Result:
+        return self.client.execute(statement.to_sql())
+
+
 class Repl:
-    def __init__(self, db: Database, stdin: TextIO, stdout: TextIO, *, interactive: bool) -> None:
+    def __init__(self, db: Backend, stdin: TextIO, stdout: TextIO, *, interactive: bool) -> None:
         self.db = db
         self.stdin = stdin
         self.stdout = stdout
@@ -141,10 +167,12 @@ class Repl:
         if name == ".help":
             self._print(HELP)
         elif name == ".tables":
-            names = [t.name for t in self.db.catalog.tables()]
-            self._print("\n".join(names) if names else "(no tables)")
+            self._tables()
         elif name == ".schema":
-            self._schema(argument)
+            if isinstance(self.db, Database):
+                self._schema(self.db, argument)
+            else:
+                self._print("Error: .schema needs a local database; use DESCRIBE <table>")
         elif name == ".timer" and argument in ("on", "off"):
             self.timer = argument == "on"
         else:
@@ -159,11 +187,18 @@ class Repl:
         else:
             self._print(result.message)
 
-    def _schema(self, table_name: str) -> None:
+    def _tables(self) -> None:
         try:
-            tables = (
-                [self.db.catalog.get_table(table_name)] if table_name else self.db.catalog.tables()
-            )
+            result = self.db.execute_statement(ast.ShowTables())
+        except PyDBError as exc:
+            self._print(f"Error: {exc}")
+            return
+        names = [str(row[0]) for row in result.rows]
+        self._print("\n".join(names) if names else "(no tables)")
+
+    def _schema(self, db: Database, table_name: str) -> None:
+        try:
+            tables = [db.catalog.get_table(table_name)] if table_name else db.catalog.tables()
         except PyDBError as exc:
             self._print(f"Error: {exc}")
             return
@@ -214,9 +249,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--connect", metavar="HOST:PORT", help="connect to a PyDB server")
     args = parser.parse_args(argv)
+    interactive = sys.stdin.isatty()
     if args.connect:
-        print("error: --connect needs the PyDB server, which is not available yet", file=sys.stderr)
-        return 2
+        host, _, port = args.connect.rpartition(":")
+        if not host:
+            host, port = args.connect, str(DEFAULT_PORT)
+        try:
+            client = Client(host, int(port))
+        except (OSError, ValueError, PyDBError) as exc:
+            print(f"error: cannot connect to {args.connect}: {exc}", file=sys.stderr)
+            return 1
+        with client:
+            return Repl(RemoteBackend(client), sys.stdin, sys.stdout, interactive=interactive).run()
     if not args.database:
         parser.error("a database path is required")
     try:
@@ -225,7 +269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: cannot open {args.database}: {exc}", file=sys.stderr)
         return 1
     with db:
-        return Repl(db, sys.stdin, sys.stdout, interactive=sys.stdin.isatty()).run()
+        return Repl(db, sys.stdin, sys.stdout, interactive=interactive).run()
 
 
 if __name__ == "__main__":

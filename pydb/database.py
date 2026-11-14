@@ -1,37 +1,38 @@
-"""An open database: storage, write-ahead log, catalog and executor, plus one session.
+"""An open database: storage, write-ahead log, catalog, executor, locks and sessions.
 
 Opening a database runs crash recovery from its log (``<path>.wal``), then takes a
-checkpoint. Statements run in transactions:
+checkpoint. SQL runs in sessions (see ``session.py``): each session has its own
+transaction, and sessions on the same database are isolated by table locks. A
+``Database`` has a built-in session, used by :meth:`execute`, for single-user code;
+:meth:`session` opens more, one per concurrent client.
 
-* outside ``BEGIN``, each statement is its own transaction (autocommit);
-* after ``BEGIN``, statements join that transaction until ``COMMIT`` or ``ROLLBACK``; a
-  statement that fails is rolled back on its own and the transaction stays open;
-* DDL and ``ANALYZE`` always run as their own transaction and are refused inside ``BEGIN``.
+A database file must be opened by one ``Database`` (one process) at a time; to share it,
+open sessions on one ``Database``, or run the server (``python -m pydb.server``).
 
-``close()`` rolls back an open transaction, writes every page, checkpoints and empties the
-log, so a cleanly closed database needs no recovery.
+``close()`` rolls back every open transaction, writes every page, checkpoints and empties
+the log, so a cleanly closed database needs no recovery.
 """
 
 import os
+import threading
+from collections.abc import Sequence
 from pathlib import Path
 from types import TracebackType
 from typing import Self
 
 from pydb.catalog.catalog import Catalog
-from pydb.config import BUFFER_POOL_SIZE, INVALID_PAGE_ID
-from pydb.errors import TransactionError
+from pydb.config import BUFFER_POOL_SIZE, INVALID_PAGE_ID, LOCK_TIMEOUT_SECONDS
 from pydb.execution.executor import Executor, Result
 from pydb.planner.physical_plan import PlannerSettings
+from pydb.session import Session
 from pydb.sql import ast
-from pydb.sql.parser import parse, parse_script
 from pydb.storage.buffer_pool import BufferPoolManager
 from pydb.storage.disk_manager import DiskManager
+from pydb.txn.lock_manager import LockManager
 from pydb.txn.recovery import RecoveryReport, recover
 from pydb.txn.transaction import Transaction
 from pydb.txn.transaction_manager import TransactionManager
 from pydb.txn.wal import LogManager
-
-SCHEMA_STATEMENTS = (ast.CreateTable, ast.DropTable, ast.CreateIndex, ast.DropIndex, ast.Analyze)
 
 
 class Database:
@@ -41,10 +42,16 @@ class Database:
         *,
         pool_size: int = BUFFER_POOL_SIZE,
         settings: PlannerSettings | None = None,
+        lock_timeout: float | None = LOCK_TIMEOUT_SECONDS,
     ) -> None:
         self.path = Path(path)
         self.wal_path = Path(f"{self.path}.wal")
         self.settings = settings or PlannerSettings()
+        self.latch = threading.RLock()
+        """Held while a statement runs inside the engine; one statement at a time."""
+        self.locks = LockManager(lock_timeout)
+        self._sessions: set[Session] = set()
+        self._sessions_lock = threading.Lock()
         self.disk = DiskManager(self.path)
         try:
             self.log = LogManager(self.wal_path)
@@ -60,7 +67,7 @@ class Database:
             self._catalog = self._open_catalog()
             self.executor = Executor(self._catalog, self.settings, self.tm)
             self.tm.checkpoint()
-            self.txn: Transaction | None = None
+            self._default = self.session()
         except BaseException:
             self.log.abandon()
             self.disk.abandon()
@@ -72,75 +79,88 @@ class Database:
         return self._catalog
 
     @property
+    def closed(self) -> bool:
+        return self.disk.closed
+
+    # ----------------------------------------------------------------- sessions
+
+    def session(self) -> Session:
+        """Open a new session: a separate connection with its own transaction."""
+        with self._sessions_lock:
+            if self.disk.closed:
+                raise ValueError("the database is closed")
+            session = Session(self)
+            self._sessions.add(session)
+            return session
+
+    def forget_session(self, session: Session) -> None:
+        with self._sessions_lock:
+            self._sessions.discard(session)
+
+    @property
+    def sessions(self) -> list[Session]:
+        with self._sessions_lock:
+            return list(self._sessions)
+
+    # ----------------------------------------------------------------- the built-in session
+
+    @property
+    def txn(self) -> Transaction | None:
+        return self._default.txn
+
+    @property
     def in_transaction(self) -> bool:
-        return self.txn is not None
+        return self._default.in_transaction
 
-    # ----------------------------------------------------------------- running SQL
-
-    def execute(self, sql: str) -> Result:
-        """Run one SQL statement."""
-        return self.execute_statement(parse(sql))
+    def execute(self, sql: str, params: Sequence[object] | None = None) -> Result:
+        """Run one SQL statement in the built-in session."""
+        return self._default.execute(sql, params)
 
     def execute_script(self, sql: str) -> list[Result]:
         """Run statements separated by semicolons, stopping at the first error."""
-        return [self.execute_statement(statement) for statement in parse_script(sql)]
+        return self._default.execute_script(sql)
 
     def execute_statement(self, statement: ast.Statement) -> Result:
-        match statement:
-            case ast.Begin():
-                if self.txn is not None:
-                    raise TransactionError("a transaction is already in progress")
-                self.txn = self.tm.begin()
-                return Result(message="BEGIN")
-            case ast.Commit():
-                txn = self._take_transaction("COMMIT")
-                self.tm.commit(txn)
-                return Result(message="COMMIT")
-            case ast.Rollback():
-                txn = self._take_transaction("ROLLBACK")
-                self.tm.abort(txn)
-                return Result(message="ROLLBACK")
-        if isinstance(statement, SCHEMA_STATEMENTS):
-            return self._run_schema_change(statement)
-        if self.txn is not None:
-            savepoint = self.txn.last_lsn
-            try:
-                with self.tm.activate(self.txn):
-                    return self.executor.execute(statement)
-            except BaseException:
-                self.tm.rollback_to(self.txn, savepoint)
-                raise
-        txn = self.tm.begin()
-        try:
-            with self.tm.activate(txn):
-                result = self.executor.execute(statement)
-        except BaseException:
-            self.tm.abort(txn)
-            raise
-        self.tm.commit(txn)
-        return result
+        return self._default.execute_statement(statement)
+
+    # ----------------------------------------------------------------- maintenance
 
     def checkpoint(self) -> None:
-        self.tm.checkpoint()
+        with self.latch:
+            self.tm.checkpoint()
+
+    def index_table(self, index_name: str) -> str | None:
+        """The table an index belongs to, or None if there is no such index."""
+        found = self.catalog.find_index(index_name)
+        return None if found is None else found[0].name
+
+    def reload_catalog(self) -> None:
+        """Re-read the catalog from its pages (after a schema change was rolled back)."""
+        self._catalog = Catalog(self.pool, migrate=False)
+        self.executor = Executor(self._catalog, self.settings, self.tm)
 
     # ----------------------------------------------------------------- closing
 
     def close(self) -> None:
         if self.disk.closed:
             return
-        try:
-            if self.txn is not None:
-                self.tm.abort(self.txn)
-                self.txn = None
-            self.tm.checkpoint()
-            if not self.tm.active_transactions:
-                self.log.truncate()
-        finally:
-            self.log.close()
-            self.disk.close()
+        self.locks.close()  # sessions waiting for a lock give up
+        with self.latch:
+            try:
+                for session in self.sessions:
+                    session.close()  # rolls back its transaction
+                for txn in self.tm.active_transactions:  # statements that gave up waiting
+                    self.tm.abort(txn)
+                self.tm.checkpoint()
+                if not self.tm.active_transactions:
+                    self.log.truncate()
+            finally:
+                self.log.close()
+                self.disk.close()
 
     def simulate_crash(self) -> None:
         """Stop as a crash would: unflushed log records and dirty pages are lost."""
+        self.locks.close()
         self.log.abandon()
         self.disk.abandon()
 
@@ -157,29 +177,6 @@ class Database:
 
     # ----------------------------------------------------------------- internals
 
-    def _take_transaction(self, verb: str) -> Transaction:
-        if self.txn is None:
-            raise TransactionError(f"{verb} without BEGIN: no transaction is in progress")
-        txn, self.txn = self.txn, None
-        return txn
-
-    def _run_schema_change(self, statement: ast.Statement) -> Result:
-        if self.txn is not None:
-            name = type(statement).__name__.upper()
-            raise TransactionError(
-                f"{name} cannot run inside a transaction; COMMIT or ROLLBACK first"
-            )
-        txn = self.tm.begin(physical=True)
-        try:
-            with self.tm.activate(txn):
-                result = self.executor.execute(statement)
-        except BaseException:
-            self.tm.abort(txn)
-            self._reload_catalog()  # the in-memory catalog may hold the undone change
-            raise
-        self.tm.commit(txn)
-        return result
-
     def _open_catalog(self) -> Catalog:
         if self.disk.catalog_root == INVALID_PAGE_ID:
             txn = self.tm.begin(physical=True)
@@ -195,10 +192,6 @@ class Database:
                 catalog.migrate()
             self.tm.commit(txn)
         return catalog
-
-    def _reload_catalog(self) -> None:
-        self._catalog = Catalog(self.pool, migrate=False)
-        self.executor = Executor(self._catalog, self.settings, self.tm)
 
     def _catalog_for_undo(self) -> Catalog:
         if self._catalog is None:  # during recovery

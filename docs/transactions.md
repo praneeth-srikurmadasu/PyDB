@@ -62,13 +62,15 @@ pages (for example, split the same B+ tree leaf). To make it always possible:
 
 **Interrupted operations.** If the process stops in the middle of a row operation, its
 `PAGE_DIFF` records come after the transaction's last `INSERT`/`DELETE`. Undo writes back
-their before-images. This is safe because operations run one at a time: those records are
-the newest in the log and nobody else has touched those bytes. Pages that a B+ tree merge
+their before-images. This is safe because statements run one at a time (under the engine
+latch, see concurrency.md): those records are the newest in the log and nobody else has
+touched those bytes. Pages that a B+ tree merge
 frees during an operation are released only after the operation's record is written, since
 undoing an interrupted merge restores the parent's pointer to them.
 
-**DDL** is a *physical* transaction, undone entirely by before-images. It never runs
-alongside other transactions, so this is safe; pages it frees are released at its commit.
+**DDL** is a *physical* transaction, undone entirely by before-images. Each DDL transaction
+is one statement, run start to finish under the engine latch, so no other change lands
+between its records and this is safe; pages it frees are released at its commit.
 
 ## Write-ahead rule and buffer policy
 
@@ -135,6 +137,7 @@ use.
 
 ## Limits
 
-- One session per database file; concurrency control (locking) is not implemented yet.
+- Concurrent sessions are isolated by table locks (see concurrency.md); one process per
+  database file.
 - Pages leaked by a crash are not reclaimed.
 - The log is emptied only at a clean close; a long-running process keeps it growing.

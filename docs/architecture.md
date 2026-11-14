@@ -1,8 +1,11 @@
 # Architecture
 
 ```
-Client: REPL (pydb/cli/repl.py) or Python (pydb.database.Database)
-  │  SQL text
+Clients: REPL, pydb.client ──TCP──▶ Server (asyncio)      pydb/cli/, pydb/client.py, pydb/server/
+         pydb.dbapi, pydb.database.Database               pydb/dbapi.py, pydb/database.py
+  │  SQL text (+ ? parameters)
+  ▼
+Session: transaction, table locks, engine latch           pydb/session.py, pydb/txn/lock_*.py
   ▼
 Lexer → Parser → AST                      pydb/sql/
   ▼
@@ -21,6 +24,20 @@ Transactions, write-ahead log, recovery   pydb/txn/  → <database>.wal
 ```
 
 Each layer only calls the one below it. A database is one data file plus one log file.
+
+## Package map
+
+| Package | What it does | Docs |
+|---|---|---|
+| `pydb/storage/` | pages, disk manager, buffer pool, slotted pages, heaps, tuples | storage.md |
+| `pydb/index/` | B+ tree and key encoding | indexing.md |
+| `pydb/sql/` | lexer, parser, AST | query-processing.md |
+| `pydb/catalog/` | schema stored as system tables | this file |
+| `pydb/planner/` | binder, statistics, optimizer, EXPLAIN | query-processing.md |
+| `pydb/execution/` | Volcano operators, expressions, table writer | query-processing.md |
+| `pydb/txn/` | WAL, transactions, recovery, lock manager | transactions.md, concurrency.md |
+| `pydb/session.py`, `database.py` | sessions on an open database | concurrency.md |
+| `pydb/server/`, `client.py`, `dbapi.py`, `cli/` | ways in | server.md |
 
 ## The life of a query
 
@@ -76,3 +93,9 @@ with `__`.
 Every statement runs in a transaction. Page changes are logged by the buffer pool, completed
 row operations by the table writer, and a commit returns once its log record is on disk.
 Opening a database replays and rolls back from the log as needed. See transactions.md.
+
+## Concurrency
+
+Sessions isolate transactions with table locks under strict two-phase locking
+(serializable), and statements run one at a time under the engine latch. Locks are taken
+before the latch, so lock waits never block the engine. See concurrency.md.

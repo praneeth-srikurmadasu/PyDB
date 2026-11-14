@@ -1,10 +1,13 @@
 import io
+import socket
 import subprocess
 import sys
 from pathlib import Path
 
-from pydb.cli.repl import Repl, format_table, statement_is_complete
+from pydb.cli.repl import RemoteBackend, Repl, format_table, statement_is_complete
+from pydb.client import Client
 from pydb.database import Database
+from pydb.server import BackgroundServer
 
 
 def run_repl(path: Path, script: str) -> str:
@@ -35,7 +38,7 @@ def test_statement_completion() -> None:
     assert not statement_is_complete("SELECT 1")
     assert not statement_is_complete("SELECT ';")
     assert not statement_is_complete("SELECT 1 /* ; */")
-    assert statement_is_complete("SELECT 1 ? 2;")  # a lexical error is reported, not awaited
+    assert statement_is_complete("SELECT 1 $ 2;")  # a lexical error is reported, not awaited
 
 
 def test_multiline_statements_meta_commands_and_errors(tmp_path: Path) -> None:
@@ -100,4 +103,28 @@ def test_command_line_entry_point_persists_between_runs(tmp_path: Path) -> None:
     assert first.returncode == 0, first.stderr
     second = cli("SELECT x FROM t WHERE x > 41;\n", db_file)
     assert "| 42 |" in second.stdout
-    assert cli("", "--connect", "localhost:5555").returncode == 2
+    with socket.socket() as probe:  # a port with nothing listening on it
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+    refused = cli("", "--connect", f"127.0.0.1:{closed_port}")
+    assert refused.returncode == 1 and "cannot connect" in refused.stderr
+
+
+def test_shell_over_the_network(tmp_path: Path) -> None:
+    script = (
+        "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);\n"
+        "BEGIN;\nINSERT INTO t VALUES (1, 'ann'), (2, 'it''s');\nCOMMIT;\n"
+        "SELECT * FROM t ORDER BY id;\n"
+        ".tables\n.schema\nINSERT INTO t VALUES (1, 'dup');\n"
+    )
+    out = io.StringIO()
+    with Database(tmp_path / "remote.db") as db, BackgroundServer(db, port=0) as server:
+        host, port = server.address
+        with Client(host, port) as client:
+            repl = Repl(RemoteBackend(client), io.StringIO(script), out, interactive=False)
+            assert repl.run() == 0
+    text = out.getvalue()
+    assert "| 2  | it's |" in text
+    assert "\nt\n" in text  # .tables
+    assert ".schema needs a local database" in text
+    assert "Error: duplicate key" in text

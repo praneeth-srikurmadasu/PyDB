@@ -19,6 +19,10 @@ class SqlSyntaxError(PyDBError):
         self.column = column
 
 
+class ParameterError(PyDBError):
+    """The ``?`` placeholders in a statement do not match the parameter values given."""
+
+
 class TypeMismatchError(PyDBError):
     """A value does not match the type it is being stored or compared as."""
 
@@ -101,3 +105,18 @@ class TransactionError(PyDBError):
 
 class LogCorruptError(PyDBError):
     """The write-ahead log is unreadable before its valid end."""
+
+
+class DeadlockError(TransactionError):
+    """Waiting for a lock would close a cycle of transactions waiting for each other.
+
+    The transaction that asked for the lock is chosen as the victim and rolled back.
+    """
+
+
+class LockTimeoutError(TransactionError):
+    """A lock could not be granted within the lock timeout; the transaction is rolled back."""
+
+
+class ProtocolError(PyDBError):
+    """A malformed message between a PyDB client and server, or a lost connection."""

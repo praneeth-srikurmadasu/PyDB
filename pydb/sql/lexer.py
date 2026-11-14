@@ -10,6 +10,7 @@ _PUNCTUATION = {
     ".": TokenType.DOT,
     ";": TokenType.SEMICOLON,
     "*": TokenType.STAR,
+    "?": TokenType.PARAM,
 }
 _TWO_CHAR_OPERATORS = {"!=": "!=", "<>": "!=", "<=": "<=", ">=": ">=", "||": "||"}
 _ONE_CHAR_OPERATORS = set("=<>+-/%")
